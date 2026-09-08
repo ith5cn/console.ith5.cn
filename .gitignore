@@ -12,5 +12,6 @@
 /dist/
 /tmp/
 coverage.out
+deploy/ith5cn/
 node_modules/
 web/dist/*
