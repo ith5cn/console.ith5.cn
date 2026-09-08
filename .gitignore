@@ -1,0 +1,16 @@
+!web/dist/.gitkeep
+# Go
+# Node / web
+# 本地环境
+*.bak
+*.test
+*.tsbuildinfo
+.DS_Store
+.env
+.env.local
+/bin/
+/dist/
+/tmp/
+coverage.out
+node_modules/
+web/dist/*

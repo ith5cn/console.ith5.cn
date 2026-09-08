@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: ith5-postgres
+    environment:
+      POSTGRES_USER: ith5
+      POSTGRES_PASSWORD: ith5
+      POSTGRES_DB: ith5
+    ports:
+      - "55432:5432"   # 避开本机可能已有的 5432
+    volumes:
+      - ith5-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ith5"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  ith5-pgdata:

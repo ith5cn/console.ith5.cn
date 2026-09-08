@@ -1,0 +1,12 @@
+.git
+.env
+.env.local
+bin/
+dist/
+tmp/
+coverage.out
+node_modules/
+web/node_modules/
+web/dist/
+*.test
+*.tsbuildinfo
