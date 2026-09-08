@@ -78,7 +78,7 @@ type BundleMeta struct {
 
 // SubjectType 是 Assignment 的授权主体类型。
 //
-// 刻意不含 "role"：users.role 只有 owner/admin/member，把它当授权维度
+// 刻意不含 "role"：users.role 只有 owner/admin/viewer/member，把它当授权维度
 // 既无实际用途，又会被误读成「岗位」——那是 PermissionGroup 的职责。
 type SubjectType string
 
@@ -91,7 +91,7 @@ const (
 // PermissionGroup 是一组 skill/command 的具名集合（classic RBAC 里的 role）。
 // 管理员维护「后端工具包」这样的组，再把组授权给人。
 //
-// 与 Principal.Role（owner/admin/member）正交：后者管「能不能进管理后台」，
+// 与 Principal.Role（owner/admin/viewer/member）正交：后者管「能不能进管理后台」，
 // 前者管「能拿到哪些内容」。
 type PermissionGroup struct {
 	ID        string
@@ -138,7 +138,7 @@ type Grant struct {
 type Principal struct {
 	UserID     string
 	OrgID      string
-	Role       string // owner | admin | member
+	Role       string // owner | admin | viewer | member
 	Suspended  bool
 	ProjectIDs []string
 }

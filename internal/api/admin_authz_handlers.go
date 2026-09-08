@@ -234,13 +234,13 @@ func (s *Server) adminCreateMember(w http.ResponseWriter, r *http.Request) {
 	if req.Role == "" {
 		req.Role = "member"
 	}
-	if req.Role != "member" && req.Role != "admin" {
-		s.fail(w, r, http.StatusBadRequest, "bad_request", "角色必须是 member 或 admin")
+	if req.Role != "member" && req.Role != "admin" && req.Role != "viewer" {
+		s.fail(w, r, http.StatusBadRequest, "bad_request", "角色必须是 member、viewer 或 admin")
 		return
 	}
-	// owner 是唯一能扩大管理面的人：admin 不能自己造出更多 admin
-	if req.Role == "admin" && p.Role != "owner" {
-		s.fail(w, r, http.StatusForbidden, "forbidden", "只有 owner 能创建管理员")
+	// owner 是唯一能扩大管理面的人：admin 不能创建 admin 或只读后台账号。
+	if req.Role != "member" && p.Role != "owner" {
+		s.fail(w, r, http.StatusForbidden, "forbidden", "只有 owner 能创建后台账号")
 		return
 	}
 	if !validPassword(w, r, s, req.Password) {

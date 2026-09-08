@@ -68,6 +68,7 @@ export interface ExplainEntry {
 
 const TOKEN_KEY = 'ith5_token'
 const USER_KEY = 'ith5_user'
+export const DEMO_READ_ONLY_MESSAGE = '当前是演示环境，无法修改'
 
 export function getToken() { return localStorage.getItem(TOKEN_KEY) }
 export function getUser(): UserInfo | null {
@@ -86,6 +87,10 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? 'GET').toUpperCase()
+  if (getUser()?.role === 'viewer' && !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    throw new ApiError(403, 'demo_read_only', DEMO_READ_ONLY_MESSAGE)
+  }
   const token = getToken()
   const res = await fetch(`/api/v1${path}`, {
     ...init,

@@ -13,7 +13,9 @@ import (
 	"github.com/ith5/ith5/internal/db"
 )
 
-// requireAdmin 校验 Web 用途的令牌，且角色必须是 owner 或 admin。
+const demoReadOnlyMessage = "当前是演示环境，无法修改"
+
+// requireAdmin 校验 Web 用途的令牌。owner/admin 可读写，viewer 只读。
 //
 // 与 CLI 面共用「实时查库判断账号状态」的规则：尚未过期的令牌不能让
 // 已停用的账号继续访问（D4）。
@@ -34,13 +36,29 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 			s.fail(w, r, http.StatusUnauthorized, "unauthorized", "账号不可用")
 			return
 		}
-		if u.Role != "owner" && u.Role != "admin" {
+		if u.Role != "owner" && u.Role != "admin" && u.Role != "viewer" {
 			s.fail(w, r, http.StatusForbidden, "forbidden", "需要管理员权限")
+			return
+		}
+		if demoMutationBlocked(u.Role, r.Method) {
+			s.fail(w, r, http.StatusForbidden, "demo_read_only", demoReadOnlyMessage)
 			return
 		}
 		p := principal{UserID: u.ID, OrgID: u.OrgID, Role: u.Role}
 		next.ServeHTTP(w, r.WithContext(withPrincipal(r, p)))
 	})
+}
+
+func demoMutationBlocked(role, method string) bool {
+	if role != "viewer" {
+		return false
+	}
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	default:
+		return true
+	}
 }
 
 // webLogin 是 Web 后台的邮箱密码登录。

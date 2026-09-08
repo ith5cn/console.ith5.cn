@@ -1,7 +1,7 @@
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api, type UserInfo } from '@/api'
+import { api, DEMO_READ_ONLY_MESSAGE, type UserInfo } from '@/api'
 import { AppShell } from '@/components/AppShell'
 import { Login } from '@/pages/Login'
 import { Overview } from '@/pages/Overview'
@@ -10,6 +10,7 @@ import { toCSV } from '@/ui'
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  localStorage.clear()
 })
 
 describe('Login', () => {
@@ -58,6 +59,22 @@ describe('AppShell', () => {
     await userEvent.click(within(sheet).getByRole('button', { name: '内容库' }))
     expect(onPageChange).toHaveBeenCalledWith('bundles')
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  })
+
+  it('shows a read-only banner for demo viewers', () => {
+    render(<AppShell {...shellProps} user={{ ...shellProps.user, role: 'viewer' }} onPageChange={() => {}}><div>content</div></AppShell>)
+    expect(screen.getByText('当前是演示环境，你可以浏览所有页面，但无法修改数据。')).toBeInTheDocument()
+  })
+})
+
+describe('Demo viewer API', () => {
+  it('blocks mutations before sending a network request', async () => {
+    localStorage.setItem('ith5_token', 'demo-token')
+    localStorage.setItem('ith5_user', JSON.stringify({ id: 'u', email: 'demo@example.com', role: 'viewer', org_id: 'o' }))
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+
+    await expect(api.createGroup('demo', 'Demo', '')).rejects.toThrow(DEMO_READ_ONLY_MESSAGE)
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })
 

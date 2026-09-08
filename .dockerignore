@@ -10,3 +10,5 @@ web/node_modules/
 web/dist/
 *.test
 *.tsbuildinfo
+._*
+**/._*
