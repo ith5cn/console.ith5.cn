@@ -153,6 +153,14 @@ export const api = {
   listMembers: () => request<{ members: Member[] }>('/admin/members'),
   setMemberStatus: (id: string, status: string) =>
     request<{ status: string }>(`/admin/members/${id}/status`, { method: 'POST', body: JSON.stringify({ status }) }),
+  // 没有邮件设施，所以建号时管理员直接设初始密码，线下交给员工
+  createMember: (email: string, name: string, role: string, password: string) =>
+    request<{ id: string }>('/admin/members', {
+      method: 'POST',
+      body: JSON.stringify({ email, name, role, password }),
+    }),
+  resetMemberPassword: (id: string, password: string) =>
+    request<void>(`/admin/members/${id}/password`, { method: 'POST', body: JSON.stringify({ password }) }),
 
   audit: (action?: string) =>
     request<{ entries: AuditEntry[] }>(`/admin/audit/distributions${action ? `?action=${action}` : ''}`),

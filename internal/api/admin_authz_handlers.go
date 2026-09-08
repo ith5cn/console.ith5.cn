@@ -3,10 +3,12 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/ith5/ith5/internal/auth"
 	"github.com/ith5/ith5/internal/core"
 	"github.com/ith5/ith5/internal/db"
 )
@@ -208,6 +210,111 @@ func (s *Server) adminSetMemberStatus(w http.ResponseWriter, r *http.Request) {
 	default:
 		s.writeJSON(w, http.StatusOK, map[string]string{"status": req.Status})
 	}
+}
+
+// adminCreateMember 建号。没有邮件设施，所以走「管理员设初始密码、
+// 线下交给员工」这条路：员工拿它 ith5 login 即可，不需要额外的邀请流程。
+func (s *Server) adminCreateMember(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(r)
+	var req struct {
+		Email    string `json:"email"`
+		Name     string `json:"name"`
+		Role     string `json:"role"`
+		Password string `json:"password"`
+	}
+	if !s.decode(w, r, &req) {
+		return
+	}
+	// 登录是按邮箱精确匹配的，这里统一归一化，免得大写邮箱建完登不进去
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	if !strings.Contains(email, "@") {
+		s.fail(w, r, http.StatusBadRequest, "bad_request", "邮箱格式不正确")
+		return
+	}
+	if req.Role == "" {
+		req.Role = "member"
+	}
+	if req.Role != "member" && req.Role != "admin" {
+		s.fail(w, r, http.StatusBadRequest, "bad_request", "角色必须是 member 或 admin")
+		return
+	}
+	// owner 是唯一能扩大管理面的人：admin 不能自己造出更多 admin
+	if req.Role == "admin" && p.Role != "owner" {
+		s.fail(w, r, http.StatusForbidden, "forbidden", "只有 owner 能创建管理员")
+		return
+	}
+	if !validPassword(w, r, s, req.Password) {
+		return
+	}
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		s.internal(w, r, err, "生成密码哈希")
+		return
+	}
+	id, err := s.db.CreateMember(r.Context(), p.OrgID, email, strings.TrimSpace(req.Name), req.Role, hash)
+	switch {
+	case errors.Is(err, db.ErrConflict):
+		s.fail(w, r, http.StatusConflict, "conflict", "该邮箱在本组织已有账号")
+	case err != nil:
+		s.internal(w, r, err, "创建成员")
+	default:
+		s.writeJSON(w, http.StatusCreated, map[string]string{"id": id})
+	}
+}
+
+// adminResetMemberPassword 重置成员密码。
+//
+// 只改密码、不吊销已签发的令牌：这是「忘了密码」的补救，不是「踢下线」——
+// 后者是停用要干的事。
+func (s *Server) adminResetMemberPassword(w http.ResponseWriter, r *http.Request) {
+	p := mustPrincipal(r)
+	var req struct {
+		Password string `json:"password"`
+	}
+	if !s.decode(w, r, &req) {
+		return
+	}
+	if !validPassword(w, r, s, req.Password) {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	role, err := s.db.MemberRole(r.Context(), p.OrgID, id)
+	switch {
+	case errors.Is(err, db.ErrNotFound):
+		s.fail(w, r, http.StatusNotFound, "not_found", "成员不存在")
+		return
+	case err != nil:
+		s.internal(w, r, err, "读取成员")
+		return
+	}
+	// admin 只能重置普通成员：否则一个 admin 能改掉 owner 的密码，直接夺权
+	if role != "member" && p.Role != "owner" {
+		s.fail(w, r, http.StatusForbidden, "forbidden", "只有 owner 能重置管理员密码")
+		return
+	}
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		s.internal(w, r, err, "生成密码哈希")
+		return
+	}
+	switch err := s.db.SetMemberPassword(r.Context(), p.OrgID, id, hash); {
+	case errors.Is(err, db.ErrNotFound):
+		s.fail(w, r, http.StatusNotFound, "not_found", "成员不存在")
+	case err != nil:
+		s.internal(w, r, err, "重置密码")
+	default:
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// validPassword 与 init-owner 用同一条下限（12 位），免得后台建出来的号
+// 比命令行建的弱。
+func validPassword(w http.ResponseWriter, r *http.Request, s *Server, pw string) bool {
+	if len([]rune(pw)) < 12 {
+		s.fail(w, r, http.StatusBadRequest, "bad_request", "密码至少 12 个字符")
+		return false
+	}
+	return true
 }
 
 func (s *Server) adminAudit(w http.ResponseWriter, r *http.Request) {

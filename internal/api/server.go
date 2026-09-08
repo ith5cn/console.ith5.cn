@@ -107,7 +107,9 @@ func (s *Server) Routes() http.Handler {
 			r.Delete("/assignments/{id}", s.adminDeleteAssignment)
 
 			r.Get("/members", s.adminListMembers)
+			r.Post("/members", s.adminCreateMember)
 			r.Post("/members/{id}/status", s.adminSetMemberStatus)
+			r.Post("/members/{id}/password", s.adminResetMemberPassword)
 
 			r.Get("/audit/distributions", s.adminAudit)
 			r.Get("/audit/executions", s.adminExecutions)
