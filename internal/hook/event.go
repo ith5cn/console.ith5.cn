@@ -23,6 +23,7 @@ type Input struct {
 	HookEventName string    `json:"hook_event_name"`
 	CWD           string    `json:"cwd"`
 	ToolName      string    `json:"tool_name"`
+	ToolUseID     string    `json:"tool_use_id"`
 	ToolInput     ToolInput `json:"tool_input"`
 	ToolResponse  ToolResp  `json:"tool_response"`
 }
@@ -34,6 +35,13 @@ type ToolInput struct {
 	OldString string `json:"old_string"`
 	NewString string `json:"new_string"`
 	Content   string `json:"content"`
+
+	// 以下三个字段**只供本机 trace 流**（trace.go），绝不进 Summary。
+	// 声明在这里是为了让 hook 只解一次 stdin —— 解两次会把 p95 顶上去。
+	// TestExtract_NeverLeaksTraceFields 守着这条边界。
+	SubagentType string `json:"subagent_type"`
+	Skill        string `json:"skill"`
+	Description  string `json:"description"`
 }
 
 type ToolResp struct {

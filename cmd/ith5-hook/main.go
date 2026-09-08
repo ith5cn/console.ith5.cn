@@ -42,29 +42,65 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// 配置只读一次。两个开关各读一次文件的话，PostToolUse 这条
+	// 每次 Edit/Bash 都同步触发的路径上就凭空多一次 syscall ——
+	// 这个二进制是 Go 写的就是为了省这种开销。
+	tele, trace := readFlags(filepath.Join(home, ".ith5", "config.json"))
+
+	// 两条流各自独立开关、互不影响：trace 只落本机给 `ith5 watch` 看，
+	// 上报关闭时它照常工作；反之遥测开着也不强制产生 trace。
+	traceErr := writeTrace(home, trace, in)
+
 	// 本机关闭上报时不产生任何事件（技术方案 §10.4）
-	if !telemetryEnabled(filepath.Join(home, ".ith5", "config.json")) {
-		return nil
+	if !tele {
+		return traceErr
 	}
 
 	root, remote := hook.FindRepo(in.CWD)
 	ev := hook.Extract(in, root, remote, nowFn(), uuid.NewString())
 	line := hook.Marshal(ev)
-	return hook.Append(filepath.Join(home, ".ith5", "queue", "events.ndjson"), line)
+	if err := hook.Append(filepath.Join(home, ".ith5", "queue", "events.ndjson"), line); err != nil {
+		return err
+	}
+	return traceErr
 }
 
-func telemetryEnabled(cfgPath string) bool {
+// writeTrace 落一条本机 trace。
+//
+// 先判 TraceKind 再判开关：高频路径（Edit/Bash/Read）在这里就是一次
+// 字符串比较后直接返回，连配置都不必看。
+func writeTrace(home string, enabled bool, in hook.Input) error {
+	if in.HookEventName != "SessionStart" && in.HookEventName != "SubagentStop" &&
+		hook.TraceKind(in.ToolName) == "" {
+		return nil
+	}
+	if !enabled {
+		return nil
+	}
+	tr, ok := hook.ExtractTrace(in, nowFn(), uuid.NewString())
+	if !ok {
+		return nil
+	}
+	return hook.Append(hook.TracePath(home, in.SessionID), hook.MarshalTrace(tr))
+}
+
+// readFlags 一次性取出两个开关。读不到配置时两者皆假
+// —— 未登录/未配置时既不采集也不 trace。
+func readFlags(cfgPath string) (telemetry, trace bool) {
 	b, err := os.ReadFile(cfgPath)
 	if err != nil {
-		return false // 未登录/未配置时不采集
+		return false, false
 	}
 	var cfg struct {
 		Telemetry struct {
 			Enabled bool `json:"enabled"`
 		} `json:"telemetry"`
+		Trace struct {
+			Enabled bool `json:"enabled"`
+		} `json:"trace"`
 	}
 	if err := json.Unmarshal(b, &cfg); err != nil {
-		return false
+		return false, false
 	}
-	return cfg.Telemetry.Enabled
+	return cfg.Telemetry.Enabled, cfg.Trace.Enabled
 }

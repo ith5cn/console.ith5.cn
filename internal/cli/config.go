@@ -20,6 +20,12 @@ type Config struct {
 	Telemetry    struct {
 		Enabled bool `json:"enabled"`
 	} `json:"telemetry"`
+	// Trace 控制本机 trace 流（~/.ith5/trace/），只服务 `ith5 watch` 看板，
+	// 永不上传。必须声明在这里：Save 会整体覆写 config.json，
+	// 漏掉字段等于每次 login/sync 都把用户打开的开关悄悄关掉。
+	Trace struct {
+		Enabled bool `json:"enabled"`
+	} `json:"trace"`
 }
 
 // Credentials 存令牌。权限 0600。

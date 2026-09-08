@@ -16,13 +16,27 @@ const hookCommand = "ith5-hook"
 //
 // PostToolUse 只匹配会改动文件或执行命令的工具 —— 匹配面越大，
 // 触发次数越多，而它是同步执行的。
+//
+// 派 subagent 的工具在不同 Claude Code 版本里叫 Task 或 Agent
+// （2.1.263 实测是 Agent），两个都要匹配 —— 少一个的症状是看板永远空白，
+// 而且完全静默，没有任何报错指向这里。
+const agentSkillMatcher = "Task|Agent|Skill"
+
+// Task/Agent/Skill 额外挂 PreToolUse：PostToolUse 在工具**结束后**才触发，
+// 一个跑几分钟的 subagent 只有它的话，看板会全程空白、到结束才刷出一整条，
+// 那就不是实时了。PreToolUse 供 start、PostToolUse 供 end，配成一段区间。
+// 这两个事件都是低频的（一次会话几十次量级），不构成性能负担。
 var hookEvents = []struct {
 	Event   string
 	Matcher string
 	Arg     string
 }{
 	{"SessionStart", "", "session-start"},
-	{"PostToolUse", "Edit|Write|MultiEdit|Bash", "post-tool-use"},
+	{"PreToolUse", agentSkillMatcher, "pre-tool-use"},
+	{"PostToolUse", "Edit|Write|MultiEdit|Bash|" + agentSkillMatcher, "post-tool-use"},
+	// subagent 以非常规方式结束时 PostToolUse 可能不来，
+	// 少了它看板上会留下一条永远在转圈的 agent。
+	{"SubagentStop", "", "subagent-stop"},
 }
 
 // InstallHooks 把 ith5-hook 合并进 Claude Code 的 settings.json。
@@ -56,7 +70,9 @@ func InstallHooks(claudeHome, binPath string) (changed bool, err error) {
 		cmd := fmt.Sprintf("%s %s", binPath, he.Arg)
 		if hookGroupsContain(groups, hookCommand) {
 			// 已有我方 handler：更新命令路径（二进制可能换了位置）
-			if updateOurCommand(groups, cmd) {
+			// 与 matcher（升级时匹配面会变，例如新增 Task|Skill —— 只更命令
+			// 会让老机器上的新事件永远不触发，且症状是静默的）。
+			if updateOurGroup(groups, cmd, he.Matcher) {
 				changed = true
 			}
 			hooks[he.Event] = groups
@@ -166,10 +182,15 @@ func groupIsOurs(g any) bool {
 	return false
 }
 
-func updateOurCommand(groups []any, cmd string) bool {
+// updateOurGroup 把已安装的我方 handler 对齐到当前期望的命令与 matcher。
+// 只动我方的组，用户自己的 handler 一律不碰。
+func updateOurGroup(groups []any, cmd, matcher string) bool {
 	changed := false
 	for _, g := range groups {
 		m, _ := g.(map[string]any)
+		if !groupIsOurs(g) {
+			continue
+		}
 		inner, _ := m["hooks"].([]any)
 		for _, h := range inner {
 			hm, _ := h.(map[string]any)
@@ -177,6 +198,16 @@ func updateOurCommand(groups []any, cmd string) bool {
 				hm["command"] = cmd
 				changed = true
 			}
+		}
+		// matcher 为空表示该事件不需要 matcher（如 SessionStart）；
+		// 此时若历史上写过一个，也一并清掉。
+		if cur, _ := m["matcher"].(string); cur != matcher {
+			if matcher == "" {
+				delete(m, "matcher")
+			} else {
+				m["matcher"] = matcher
+			}
+			changed = true
 		}
 	}
 	return changed

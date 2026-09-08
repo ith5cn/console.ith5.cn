@@ -31,6 +31,7 @@ func usage() {
   ith5 login     登录并绑定本机
   ith5 sync      同步公司分发的内容
   ith5 status    查看当前状态
+  ith5 watch     本机工作流看板（实时看在跑哪个 agent/skill 与 task 进度）
   ith5 doctor    体检
   ith5 logout    登出（--purge 同时移除已安装内容）
 
@@ -52,6 +53,8 @@ func run(args []string) error {
 		return cmdSync(ctx)
 	case "status":
 		return cmdStatus()
+	case "watch":
+		return cmdWatch(args[1:])
 	case "doctor":
 		return cmdDoctor()
 	case "logout":
@@ -203,7 +206,10 @@ func installHooks(s *session) error {
 		return err
 	}
 	if changed {
-		fmt.Println("✓ 已配置执行审计上报（原有 hook 已保留，备份见 settings.json.ith5.bak）")
+		// 措辞保持中性：装 hook 本身不等于开始上报，上报由 telemetry.enabled
+		// 单独决定。`ith5 watch` 也会走到这里，那条路径上并没有开启上报，
+		// 说成「已配置上报」会让人以为看板把数据传走了。
+		fmt.Println("✓ 已配置 Claude Code hook（原有 hook 已保留，备份见 settings.json.ith5.bak）")
 	}
 	return nil
 }
