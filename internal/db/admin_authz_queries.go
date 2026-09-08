@@ -328,3 +328,44 @@ func (d *DB) GetUserProjects(ctx context.Context, userID string) ([]string, erro
 
 var _ = errors.Is
 var _ = pgx.ErrNoRows
+
+// CreateMember 在组织内建号。password_hash 由调用方算好传进来，
+// 这一层不认识明文密码。
+func (d *DB) CreateMember(ctx context.Context, orgID, email, name, role, pwHash string) (string, error) {
+	var id string
+	err := d.pool.QueryRow(ctx, `
+		INSERT INTO users (org_id, email, name, role, status, password_hash)
+		VALUES ($1,$2,$3,$4::user_role,'active',$5) RETURNING id::text`,
+		orgID, email, name, role, pwHash).Scan(&id)
+	if isUniqueViolation(err) {
+		return "", ErrConflict
+	}
+	return id, err
+}
+
+// SetMemberPassword 重置成员密码。
+//
+// 刻意不动 status，也不吊销已签发的令牌：改密码是「以后用新密码登录」，
+// 不是「踢下线」——后者是停用要干的事。
+func (d *DB) SetMemberPassword(ctx context.Context, orgID, id, pwHash string) error {
+	tag, err := d.pool.Exec(ctx,
+		`UPDATE users SET password_hash=$3 WHERE org_id=$1 AND id=$2`, orgID, id, pwHash)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// MemberRole 读一个成员的角色，供越权校验用（admin 不能碰 owner/admin）。
+func (d *DB) MemberRole(ctx context.Context, orgID, id string) (string, error) {
+	var role string
+	err := d.pool.QueryRow(ctx,
+		`SELECT role::text FROM users WHERE org_id=$1 AND id=$2`, orgID, id).Scan(&role)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return role, err
+}
