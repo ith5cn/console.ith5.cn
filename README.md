@@ -32,7 +32,9 @@ binary (migrations and admin UI embedded); the only dependency is PostgreSQL.</s
 不装环境也能先看一眼管理后台长什么样：
 
 - **地址**：<https://console.ith5.cn>
-- **账号**：`ith5cn@163.com` / `ith5cn`
+- **组织**：`demo`
+- **账号**：`test@ith5.cn`
+- **密码**：`xLzhQrXMPs6JTEcgignI0p0j`
 
 > 这是公开演示环境，数据会被重置，请勿放入真实敏感信息。想在自己的机器上跑，见下面的
 > [快速上手](#快速上手)。
@@ -54,6 +56,7 @@ binary (migrations and admin UI embedded); the only dependency is PostgreSQL.</s
 - [它做什么](#它做什么)
 - [明确做不到的](#明确做不到的)
 - [快速上手](#快速上手)
+- [本机工作流看板](#本机工作流看板)
 - [架构](#架构)
 - [服务端配置](#服务端配置)
 - [开发](#开发)
@@ -125,7 +128,54 @@ ith5 sync
 | `ith5 sync` | 同步公司分发的内容 |
 | `ith5 status` | 查看当前状态 |
 | `ith5 doctor` | 逐项体检，给出可执行的建议 |
+| `ith5 watch` | 本机工作流看板（见下） |
 | `ith5 logout` | 登出（`--purge` 同时移除已安装内容） |
+
+## 本机工作流看板
+
+用 `/ith5-ai` 这类编排型 skill 跑自动开发时，它的 N1-N8 节点是在主会话里内联执行的，
+Claude Code 不提供任何进度界面——你只能翻滚动条猜它走到哪了。`ith5 watch` 把这件事
+变成一个页面。
+
+```sh
+cd /path/to/你的项目     # 看板从这里读 specs/*/tasks.md
+ith5 watch
+```
+
+它会开启本机 trace、补齐所需 hook、起一个**只监听 `127.0.0.1`** 的看板并打开浏览器。
+参数：`--port` 固定端口、`--project` 指定项目根、`--no-open` 不开浏览器。
+
+> **装完必须重启 Claude Code。** settings.json 只在会话启动时读取，已经开着的会话
+> 不会加载新 hook——此时看板会一直空白，且**不会有任何报错**提示你。
+
+看板上有三块：**正在运行**（当前在跑哪些 agent / skill，秒数实时走，并行派发会同时列出）、
+**Task 进度**（读 `specs/<feature>/tasks.md` 的复选框，`3/6 · 50%`）、**最近调用**（已完成项与耗时）。
+
+Task 进度刻意取自磁盘而非事件流：`[x]` 标记本就是 ith5-ai 断点续跑依赖的那份真相，
+事件会漏，磁盘上的复选框不会。Edit/Bash/Read 一律不显示——一次会话几百条，
+只会把「工作流走到哪了」淹掉。
+
+### 它记什么、不记什么
+
+trace 是**独立于审计队列的第二条流**，写在 `~/.ith5/trace/<session>.ndjson`，
+**只落本机、永不上传**。两者的开关（`trace.enabled` / `telemetry.enabled`）互不影响：
+`ith5 watch` 不会开启上报。
+
+之所以另开一条而不复用审计队列：看板需要 subagent 名、skill 名、task 描述，
+这些一旦上传就越过了审计的 L0 禁运清单；而审计队列在未登录时完全静默，
+看板却是开发者看自己本机的工具，不该要求登录。
+
+`ith5 watch` 装的 hook（合并写入，保留你已有的 handler，备份为 `settings.json.ith5.bak`）：
+
+| 事件 | matcher | 用途 |
+|---|---|---|
+| `PreToolUse` | `Task\|Agent\|Skill` | agent/skill 的**开始**点——「正在运行」全靠它 |
+| `PostToolUse` | `Edit\|Write\|MultiEdit\|Bash\|Task\|Agent\|Skill` | 后半段记结束与耗时；前半段属审计，看板不用 |
+| `SessionStart` | — | 标记会话开始 |
+| `SubagentStop` | — | 兜底：agent 非正常结束时 PostToolUse 可能不来 |
+
+关掉：把 `~/.ith5/config.json` 的 `trace.enabled` 改为 `false` 即停止记录，
+`~/.ith5/trace/` 可随时删除；连 hook 一并卸掉用 `ith5 logout --purge`。
 
 ## 架构
 
@@ -184,7 +234,8 @@ cmd/ith5-hook         hook 入口（独立二进制，p95 2.8ms）
 cmd/ith5-server       服务端（自带迁移与管理后台）
 internal/core         纯逻辑，零依赖：权限解析、checksum、同步计划、路径安全
 internal/cli          store、三种落盘策略、sync 编排、队列上传
-internal/hook         事件白名单提取、git 仓库识别、队列
+internal/hook         事件白名单提取、git 仓库识别、队列；本机 trace 流
+internal/watch        本机看板：trace 跟踪、状态还原、SSE 推送、内嵌页面
 internal/api          HTTP 层
 internal/db           仓储层（手写 pgx）
 web/                  管理后台
