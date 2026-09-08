@@ -24,9 +24,43 @@ esac
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# 网关中转大响应体不可靠：ith5 本体约 8 MiB，整包取要么快速返回 500，
+# 要么回了 206 头之后在 1.4-1.9 MiB 处卡死（2.4 MiB 的 ith5-hook 则一直正常）。
+# 所以按 1 MiB 分块用 Range 取回再拼接 —— 1 MiB 实测稳定，且与二进制大小
+# 脱钩，以后再长大也不会重新踩到上限。
+CHUNK=1048576
+RETRIES=3
+
+fetch() { # fetch <url> <目标文件>
+  _url="$1"; _dest="$2"; _start=0
+  : > "$_dest"
+  while :; do
+    _try=1
+    while :; do
+      _code="$(curl -sS --max-time 120 -w '%{http_code}' \
+        -H "Range: bytes=${_start}-$((_start + CHUNK - 1))" \
+        "$_url" -o "$TMP/.chunk" || echo 000)"
+      case "$_code" in
+        # 206 正常；200 表示服务端忽略了 Range，整个文件已经在手上
+        206|200|416) break ;;
+      esac
+      [ "$_try" -ge "$RETRIES" ] && return 1
+      _try=$((_try + 1))
+      sleep 2
+    done
+    # 416：上一块正好取到结尾，没有更多内容
+    [ "$_code" = 416 ] && return 0
+    _n="$(wc -c < "$TMP/.chunk" | tr -d ' ')"
+    cat "$TMP/.chunk" >> "$_dest"
+    [ "$_code" = 200 ] && return 0
+    [ "$_n" -lt "$CHUNK" ] && return 0
+    _start=$((_start + _n))
+  done
+}
+
 echo "正在从 $SERVER 下载 ${OS}-${ARCH} 版本…"
 for f in ith5 ith5-hook SHA256SUMS; do
-  if ! curl -fsSL "$SERVER/dist/${OS}-${ARCH}/$f" -o "$TMP/$f"; then
+  if ! fetch "$SERVER/dist/${OS}-${ARCH}/$f" "$TMP/$f"; then
     echo "下载 $f 失败。检查网络或 VPN 是否已连接。" >&2
     exit 1
   fi
