@@ -1,210 +1,40 @@
 import { useState } from 'react'
+import { ArrowLeft, FileCode2, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { toast } from 'sonner'
 import { api, type Bundle, type FileItem, type VersionInfo } from '../api'
-import { Empty, Err, fmtTime, useAsync } from '../ui'
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Textarea } from '@/components/ui/textarea'
+import { Empty, Err, fmtTime, PageHeader, TableSkeleton, useAsync } from '../ui'
 
 export function Bundles() {
   const { data, err, loading, reload } = useAsync(() => api.listBundles())
   const [editing, setEditing] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
-
   if (editing) return <Editor id={editing} onBack={() => { setEditing(null); reload() }} />
-
-  return (
-    <>
-      <h1>内容</h1>
-      <p className="sub">
-        skill 与 command 落盘为 ~/.claude/skills/&lt;名称&gt;/SKILL.md，两者只差谁能触发；
-        agent 落盘为 ~/.claude/agents/&lt;名称&gt;.md，是可被派发的 subagent
-      </p>
-      <div className="row" style={{ marginBottom: 14 }}>
-        <button className="btn primary" onClick={() => setCreating(true)}>新建</button>
-        <div className="spacer" />
-        <button className="btn" onClick={reload}>刷新</button>
-      </div>
-      {creating && <Create onDone={(id) => { setCreating(false); setEditing(id) }} onCancel={() => setCreating(false)} />}
-      <Err msg={err} />
-      {loading ? <Empty>加载中…</Empty> : !data?.bundles?.length ? <Empty>还没有内容，先新建一个</Empty> : (
-        <table>
-          <thead>
-            <tr><th>名称</th><th>类型</th><th>版本</th><th>所属权限组</th><th>更新时间</th><th></th></tr>
-          </thead>
-          <tbody>
-            {data.bundles.map((b: Bundle) => (
-              <tr key={b.id}>
-                <td>
-                  <strong>{b.name}</strong>{b.archived && <span className="tag warn" style={{ marginLeft: 6 }}>已归档</span>}
-                  <div className="muted">{b.description}</div>
-                </td>
-                <td><span className="tag">{b.kind}</span></td>
-                <td>{b.latest_version > 0 ? `v${b.latest_version}` : <span className="muted">未发布</span>}</td>
-                <td>{b.groups?.length ? b.groups.map((g) => <span key={g} className="tag group">{g}</span>) : <span className="muted">—</span>}</td>
-                <td className="muted">{fmtTime(b.updated_at)}</td>
-                <td><button className="btn" onClick={() => setEditing(b.id)}>编辑</button></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </>
-  )
+  return <><PageHeader title="内容库" description="管理可分发的 skills、commands 与 agents。" action={<Button onClick={() => setCreating(true)}><Plus />新建内容</Button>} /><div className="mb-4 flex justify-end"><Button variant="outline" size="sm" onClick={reload}><RefreshCw />刷新</Button></div><Create open={creating} onOpenChange={setCreating} onDone={(id) => { setCreating(false); setEditing(id) }} /><Err msg={err} />{loading ? <TableSkeleton /> : !data?.bundles.length ? <Empty>还没有内容，先新建一个</Empty> : <Card className="overflow-hidden"><Table><TableHeader><TableRow><TableHead>内容</TableHead><TableHead>类型</TableHead><TableHead>版本</TableHead><TableHead>权限组</TableHead><TableHead>更新时间</TableHead><TableHead /></TableRow></TableHeader><TableBody>{data.bundles.map((b: Bundle) => <TableRow key={b.id}><TableCell><div className="font-medium">{b.name}{b.archived && <Badge variant="warning" className="ml-2">已归档</Badge>}</div><div className="mt-1 max-w-md text-xs text-muted-foreground">{b.description}</div></TableCell><TableCell><Badge variant={b.kind === 'skill' ? 'accent' : 'default'}>{b.kind}</Badge></TableCell><TableCell className="font-mono">{b.latest_version > 0 ? `v${b.latest_version}` : <span className="font-sans text-muted-foreground">未发布</span>}</TableCell><TableCell>{b.groups?.length ? b.groups.map((g) => <Badge key={g} variant="outline" className="mr-1">{g}</Badge>) : <span className="text-muted-foreground">—</span>}</TableCell><TableCell className="whitespace-nowrap text-muted-foreground">{fmtTime(b.updated_at)}</TableCell><TableCell className="text-right"><Button variant="ghost" size="sm" onClick={() => setEditing(b.id)}>打开</Button></TableCell></TableRow>)}</TableBody></Table></Card>}</>
 }
 
-function Create({ onDone, onCancel }: { onDone: (id: string) => void; onCancel: () => void }) {
-  const [name, setName] = useState('')
-  const [kind, setKind] = useState('skill')
-  const [desc, setDesc] = useState('')
-  const [content, setContent] = useState('')
-  const [err, setErr] = useState('')
-
-  // 留空时服务端会按类型种一份模板；这里预览它，让人知道会得到什么。
-  // agent 的模板必须带 name 且等于 bundle 名——发布时会硬校验，
-  // 这里就把它显示出来，省得管理员改了名字忘了同步。
-  const placeholder =
-    kind === 'command'
-      ? '---\ndescription: （留空则用下面这段模板）\ndisable-model-invocation: true\n---\n\n在这里写下这个命令要执行的步骤。'
-      : kind === 'agent'
-        ? `---\nname: ${name || '（这里必须等于上面的名称）'}\ndescription: （留空则用下面这段模板）\n---\n\n在这里写下这个 subagent 的职责、工作流程与交付格式。`
-        : '---\ndescription: （留空则用下面这段模板）\n---\n\n在这里写下 Claude 应当遵循的指令。'
-
-  async function submit() {
-    setErr('')
-    try {
-      const r = await api.createBundle(name, kind, desc, content)
-      onDone(r.id)
-    } catch (e) { setErr((e as Error).message) }
-  }
-
-  return (
-    <div className="panel">
-      <label>{kind === 'agent' ? '名称（小写、连字符；派发时用的就是这个名字）' : '名称（小写、连字符；会成为 /名称 这个命令）'}</label>
-      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="corp-api-review" />
-
-      <label>类型</label>
-      <select value={kind} onChange={(e) => setKind(e.target.value)}>
-        <option value="skill">skill —— Claude 判断相关时可自动调用</option>
-        <option value="command">command —— 只有用户敲 /名称 才触发</option>
-        <option value="agent">agent —— 可被派发的 subagent</option>
-      </select>
-      {kind === 'agent' ? (
-        <p className="muted" style={{ marginTop: 4 }}>
-          落盘为 <code>~/.claude/agents/&lt;名称&gt;.md</code>，<b>只能有这一个文件</b>，不能带支持文件。
-          正文的 <code>name:</code> 必须与上面的名称完全一致——派发时用的是这个名称，
-          对不上的话 agent 装得上但永远派发不到，而且本地看不出任何异常。发布时会拒绝。
-        </p>
-      ) : (
-        <p className="muted" style={{ marginTop: 4 }}>
-          skill 与 command 落盘位置相同，只决定 SKILL.md 里的 frontmatter。
-          选 command 时正文必须带 <code>disable-model-invocation: true</code>，
-          发布时会校验，不一致会被拒绝。
-        </p>
-      )}
-
-      <label>说明（会写进 frontmatter 的 description，Claude 据此判断何时使用）</label>
-      <input value={desc} onChange={(e) => setDesc(e.target.value)} />
-
-      <label>正文（可留空，创建后在编辑器里继续写）</label>
-      <textarea className="mono" rows={10} value={content} placeholder={placeholder}
-        onChange={(e) => setContent(e.target.value)} />
-
-      <Err msg={err} />
-      <div className="row" style={{ marginTop: 12 }}>
-        <button className="btn primary" onClick={submit} disabled={!name}>创建并编辑</button>
-        <button className="btn" onClick={onCancel}>取消</button>
-      </div>
-    </div>
-  )
+function Create({ open, onOpenChange, onDone }: { open: boolean; onOpenChange: (open: boolean) => void; onDone: (id: string) => void }) {
+  const [name, setName] = useState(''); const [kind, setKind] = useState('skill'); const [desc, setDesc] = useState(''); const [content, setContent] = useState(''); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false)
+  const placeholder = kind === 'command' ? '---\ndescription: 描述\ndisable-model-invocation: true\n---\n\n在这里写下命令步骤。' : kind === 'agent' ? `---\nname: ${name || 'agent-name'}\ndescription: 描述\n---\n\n在这里写下 subagent 的职责。` : '---\ndescription: 描述\n---\n\n在这里写下 Claude 应当遵循的指令。'
+  async function submit(e: React.FormEvent) { e.preventDefault(); setErr(''); setBusy(true); try { const r = await api.createBundle(name, kind, desc, content); onDone(r.id); toast.success('内容已创建') } catch (error) { setErr((error as Error).message) } finally { setBusy(false) } }
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-w-2xl"><DialogHeader><DialogTitle>新建内容</DialogTitle><DialogDescription>创建后进入编辑器继续完善，发布前不会下发给成员。</DialogDescription></DialogHeader><form onSubmit={submit} className="space-y-4"><div className="space-y-2"><Label htmlFor="bundle-name">名称</Label><Input id="bundle-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="corp-api-review" required autoFocus /></div><div className="space-y-2"><Label>类型</Label><Select value={kind} onValueChange={setKind}><SelectTrigger aria-label="内容类型"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="skill">skill — 可自动调用</SelectItem><SelectItem value="command">command — 用户主动触发</SelectItem><SelectItem value="agent">agent — 可派发的 subagent</SelectItem></SelectContent></Select></div><div className="space-y-2"><Label htmlFor="bundle-description">说明</Label><Input id="bundle-description" value={desc} onChange={(e) => setDesc(e.target.value)} /></div><div className="space-y-2"><Label htmlFor="bundle-content">正文</Label><Textarea id="bundle-content" className="min-h-52 font-mono text-xs" value={content} placeholder={placeholder} onChange={(e) => setContent(e.target.value)} /></div><Err msg={err} /><DialogFooter><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>取消</Button><Button disabled={!name || busy}>{busy ? '创建中…' : '创建并编辑'}</Button></DialogFooter></form></DialogContent></Dialog>
 }
 
 function Editor({ id, onBack }: { id: string; onBack: () => void }) {
-  const { data, err, reload } = useAsync(() => api.getBundle(id), [id])
-  const vers = useAsync(() => api.listVersions(id), [id])
-  const [files, setFiles] = useState<FileItem[] | null>(null)
-  const [changelog, setChangelog] = useState('')
-  const [msg, setMsg] = useState('')
-  const [oops, setOops] = useState('')
-
+  const { data, err, reload } = useAsync(() => api.getBundle(id), [id]); const vers = useAsync(() => api.listVersions(id), [id]); const [files, setFiles] = useState<FileItem[] | null>(null); const [changelog, setChangelog] = useState(''); const [oops, setOops] = useState('')
   const current = files ?? data?.draft_files ?? []
-  const setFile = (i: number, patch: Partial<FileItem>) =>
-    setFiles(current.map((f, j) => (j === i ? { ...f, ...patch } : f)))
-
-  async function save() {
-    setOops(''); setMsg('')
-    try { await api.saveDraft(id, current); setMsg('草稿已保存'); reload() }
-    catch (e) { setOops((e as Error).message) }
-  }
-  async function publish() {
-    setOops(''); setMsg('')
-    try {
-      const r = await api.publish(id, changelog)
-      setMsg(`已发布 v${r.version}`); setChangelog(''); setFiles(null); reload(); vers.reload()
-    } catch (e) { setOops((e as Error).message) }
-  }
-  async function rollback(v: number) {
-    setOops(''); setMsg('')
-    try {
-      const r = await api.rollback(id, v)
-      setMsg(`已回滚：用 v${v} 的内容发布了 v${r.version}`)
-      setFiles(null); reload(); vers.reload()
-    } catch (e) { setOops((e as Error).message) }
-  }
-
-  return (
-    <>
-      <button className="btn" onClick={onBack}>← 返回</button>
-      <h1 style={{ marginTop: 12 }}>{data?.name ?? '…'}</h1>
-      <p className="sub">
-        当前发布版本 {data?.latest_version ? `v${data.latest_version}` : '无'} ·
-        草稿改动只有点「发布」才会下发给员工
-      </p>
-      <Err msg={err} /><Err msg={oops} />
-      {msg && <div className="ok">{msg}</div>}
-
-      <div className="panel">
-        {current.map((f, i) => (
-          <div key={i} style={{ marginBottom: 14 }}>
-            <div className="row">
-              <input value={f.path} onChange={(e) => setFile(i, { path: e.target.value })}
-                style={{ maxWidth: 320 }} />
-              <button className="btn" onClick={() => setFiles(current.filter((_, j) => j !== i))}>删除</button>
-            </div>
-            <textarea className="mono" rows={f.path === 'SKILL.md' ? 12 : 6} value={f.content}
-              onChange={(e) => setFile(i, { content: e.target.value })} style={{ marginTop: 6 }} />
-          </div>
-        ))}
-        <button className="btn" onClick={() => setFiles([...current, { path: '', content: '' }])}>+ 添加文件</button>
-        <p className="muted" style={{ marginTop: 10 }}>必须包含 SKILL.md。路径为相对路径，不得包含 .. 或绝对路径。</p>
-        <div className="row" style={{ marginTop: 12 }}>
-          <button className="btn" onClick={save}>保存草稿</button>
-          <input placeholder="本次变更说明" value={changelog}
-            onChange={(e) => setChangelog(e.target.value)} style={{ maxWidth: 300 }} />
-          <button className="btn primary" onClick={publish}>发布新版本</button>
-        </div>
-      </div>
-
-      <h1 style={{ fontSize: 16 }}>版本历史</h1>
-      {!vers.data?.versions?.length ? <Empty>尚未发布过</Empty> : (
-        <table>
-          <thead><tr><th>版本</th><th>说明</th><th>发布者</th><th>时间</th><th></th></tr></thead>
-          <tbody>
-            {vers.data.versions.map((v: VersionInfo) => (
-              <tr key={v.version}>
-                <td>
-                  v{v.version}
-                  {/* 回滚在审计里必须可见——changelog 是自由文本，承担不了这个职责 */}
-                  {v.rollback_of_version ? <span className="tag warn" style={{ marginLeft: 6 }}>回滚自 v{v.rollback_of_version}</span> : null}
-                </td>
-                <td>{v.changelog || <span className="muted">—</span>}</td>
-                <td className="muted">{v.published_by}</td>
-                <td className="muted">{fmtTime(v.published_at)}</td>
-                <td>
-                  {v.version !== data?.latest_version &&
-                    <button className="btn" onClick={() => rollback(v.version)}>回滚到此版</button>}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </>
-  )
+  const setFile = (i: number, patch: Partial<FileItem>) => setFiles(current.map((f, j) => j === i ? { ...f, ...patch } : f))
+  async function save() { setOops(''); try { await api.saveDraft(id, current); toast.success('草稿已保存'); reload() } catch (error) { setOops((error as Error).message) } }
+  async function publish() { setOops(''); try { const r = await api.publish(id, changelog); toast.success(`已发布 v${r.version}`); setChangelog(''); setFiles(null); reload(); vers.reload() } catch (error) { setOops((error as Error).message) } }
+  async function rollback(v: number) { setOops(''); try { const r = await api.rollback(id, v); toast.success(`已用 v${v} 的内容发布 v${r.version}`); setFiles(null); reload(); vers.reload() } catch (error) { setOops((error as Error).message) } }
+  return <><Button variant="ghost" className="mb-4 -ml-2" onClick={onBack}><ArrowLeft />返回内容库</Button><PageHeader title={data?.name ?? '加载中…'} description={<>当前发布版本 <span className="font-mono">{data?.latest_version ? `v${data.latest_version}` : '无'}</span> · 草稿只有发布后才会下发</>} /><Err msg={err} /><Err msg={oops} /><Card><CardHeader className="border-b"><CardTitle className="flex items-center gap-2"><FileCode2 className="size-4 text-primary" />草稿文件</CardTitle></CardHeader><CardContent className="space-y-5 p-5">{current.map((f, i) => <div key={i} className="space-y-2"><div className="flex gap-2"><Input aria-label={`文件 ${i + 1} 路径`} value={f.path} onChange={(e) => setFile(i, { path: e.target.value })} className="max-w-sm font-mono text-xs" /><Button variant="outline" size="icon" aria-label="删除文件" onClick={() => setFiles(current.filter((_, j) => j !== i))}><Trash2 /></Button></div><Textarea aria-label={`${f.path || '未命名文件'} 内容`} className="min-h-44 font-mono text-xs leading-6" value={f.content} onChange={(e) => setFile(i, { content: e.target.value })} /></div>)}<Button variant="outline" size="sm" onClick={() => setFiles([...current, { path: '', content: '' }])}><Plus />添加文件</Button><p className="text-xs text-muted-foreground">必须包含 SKILL.md；路径为相对路径，不得包含 .. 或绝对路径。</p><div className="flex flex-col gap-2 border-t pt-5 sm:flex-row"><Button variant="outline" onClick={save}>保存草稿</Button><Input aria-label="本次变更说明" placeholder="本次变更说明" value={changelog} onChange={(e) => setChangelog(e.target.value)} className="sm:ml-auto sm:max-w-xs" /><Button onClick={publish}>发布新版本</Button></div></CardContent></Card><h2 className="mb-3 mt-7 text-base font-semibold">版本历史</h2>{vers.loading ? <TableSkeleton rows={3} /> : !vers.data?.versions.length ? <Empty>尚未发布过</Empty> : <Card className="overflow-hidden"><Table><TableHeader><TableRow><TableHead>版本</TableHead><TableHead>说明</TableHead><TableHead>发布者</TableHead><TableHead>时间</TableHead><TableHead /></TableRow></TableHeader><TableBody>{vers.data.versions.map((v: VersionInfo) => <TableRow key={v.version}><TableCell className="font-mono">v{v.version}{v.rollback_of_version ? <Badge variant="warning" className="ml-2 font-sans">回滚自 v{v.rollback_of_version}</Badge> : null}</TableCell><TableCell>{v.changelog || <span className="text-muted-foreground">—</span>}</TableCell><TableCell className="text-muted-foreground">{v.published_by}</TableCell><TableCell className="whitespace-nowrap text-muted-foreground">{fmtTime(v.published_at)}</TableCell><TableCell className="text-right">{v.version !== data?.latest_version && <AlertDialog><AlertDialogTrigger asChild><Button variant="ghost" size="sm">回滚到此版</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>确认回滚到 v{v.version}？</AlertDialogTitle><AlertDialogDescription>系统会用该版本内容发布一个新版本，历史记录不会删除。</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>取消</AlertDialogCancel><AlertDialogAction onClick={() => rollback(v.version)}>确认回滚</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>}</TableCell></TableRow>)}</TableBody></Table></Card>}</>
 }

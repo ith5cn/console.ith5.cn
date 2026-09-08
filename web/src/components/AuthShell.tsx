@@ -1,0 +1,11 @@
+import type { ReactNode } from 'react'
+import { Database, EyeOff, FileCode2, LaptopMinimalCheck, Server, ShieldCheck, Terminal } from 'lucide-react'
+export function AuthShell({ children, title = '让 AI 编码能力，在团队里可靠流动。' }: { children: ReactNode; title?: string }) {
+  return <div className="min-h-screen bg-card lg:grid lg:grid-cols-[1.15fr_.85fr]">
+    <section className="tech-grid relative flex min-h-72 overflow-hidden bg-[#0b0d14] p-7 text-slate-100 sm:p-10 lg:min-h-screen lg:p-12"><div className="absolute -bottom-32 -right-24 size-96 rounded-full bg-primary/30 blur-3xl" /><div className="relative z-10 flex w-full flex-col">
+      <div className="flex items-center gap-3 font-semibold"><span className="grid size-8 place-items-center rounded-lg bg-primary shadow-[0_0_24px_rgba(113,99,243,.55)]"><Terminal className="size-4" /></span>ITH5<span className="ml-auto font-mono text-[11px] font-normal tracking-widest text-slate-500">OPEN SOURCE</span></div>
+      <div className="my-auto max-w-xl py-12 lg:py-0"><h1 className="text-balance text-3xl font-semibold leading-tight tracking-[-.035em] text-white sm:text-4xl">{title}</h1><p className="mt-4 hidden max-w-lg text-base leading-7 text-slate-400 sm:block">统一发布 skills、commands 与 agents。权限、版本、回滚和审计，都在一个自托管控制平面里完成。</p><div className="mt-8 hidden items-center gap-3 font-mono text-xs text-slate-300 sm:flex"><span className="flex items-center gap-2"><FileCode2 className="size-4 text-primary" />Publish</span><span className="text-slate-600">──→</span><span className="flex items-center gap-2"><ShieldCheck className="size-4 text-primary" />Resolve</span><span className="text-slate-600">──→</span><span className="flex items-center gap-2"><LaptopMinimalCheck className="size-4 text-primary" />Sync</span></div></div>
+      <div className="hidden flex-wrap gap-5 text-xs text-slate-500 sm:flex"><span className="flex items-center gap-1.5"><Server className="size-3.5" />自托管</span><span className="flex items-center gap-1.5"><Database className="size-3.5" />仅依赖 PostgreSQL</span><span className="flex items-center gap-1.5"><EyeOff className="size-3.5" />不上报提示词与文件内容</span></div>
+    </div></section><section className="grid place-items-center px-6 py-12 sm:px-10">{children}</section>
+  </div>
+}

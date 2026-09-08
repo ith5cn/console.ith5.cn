@@ -1,154 +1,30 @@
-import { useState } from 'react'
+import * as React from 'react'
+import { Download, ShieldAlert } from 'lucide-react'
 import { api } from '../api'
-import { Empty, Err, downloadCSV, fmtTime, toCSV, useAsync } from '../ui'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Empty, Err, downloadCSV, fmtTime, PageHeader, TableSkeleton, toCSV, useAsync } from '../ui'
 
 type Tab = 'all' | 'exec' | 'blocked' | 'stale'
 
 export function Audit() {
-  const [tab, setTab] = useState<Tab>('all')
-  const dist = useAsync(() => api.audit(tab === 'blocked' ? 'conflict_skipped' : undefined), [tab])
-  const exec = useAsync(() => api.executions(), [tab])
-  const stale = useAsync(() => api.staleMachines(), [tab])
+  const state = useAuditState()
+  return <><PageHeader title="审计事件" description="分发、执行与异常记录；仅保留治理所需元数据。" action={<Button variant="outline" onClick={state.exportCSV}><Download />导出 CSV</Button>} /><Tabs value={state.tab} onValueChange={(v) => state.setTab(v as Tab)}><TabsList className="mb-4 max-w-full overflow-x-auto"><TabsTrigger value="all">分发记录</TabsTrigger><TabsTrigger value="exec">执行记录</TabsTrigger><TabsTrigger value="blocked">下发受阻</TabsTrigger><TabsTrigger value="stale">长期未同步</TabsTrigger></TabsList></Tabs>{state.tab === 'exec' && <Info>只记录工具、仓库和文件等元数据；文件内容、diff、完整命令和提示词一律不上报。</Info>}{state.tab === 'blocked' && <Info>目标路径被成员自有的同名内容占用，因此跳过且不做改动。</Info>}{state.tab === 'stale' && <Info>用户级表示该成员所有设备都已掉队；设备级通常代表换机或闲置。</Info>}<AuditContent {...state} /></>
+}
 
-  function exportCSV() {
-    if (tab === 'stale') {
-      downloadCSV('stale-machines.csv', toCSV(stale.data?.machines ?? [], [
-        ['email', '成员'], ['hostname', '设备'], ['last_seen_at', '最后活跃'],
-        ['days', '已停(天)'], ['user_level', '用户级掉队'],
-      ]))
-    } else if (tab === 'exec') {
-      const rows = (exec.data?.entries ?? []).map((e) => ({
-        occurred_at: e.occurred_at, email: e.email, hostname: e.hostname,
-        tool_name: e.tool_name ?? e.event_type, repo: e.summary.repo ?? '',
-        file_path: e.summary.file_path ?? '', bash_command: e.summary.bash_command ?? '',
-        lines_changed: e.summary.lines_changed ?? '',
-      }))
-      downloadCSV('executions.csv', toCSV(rows, [
-        ['occurred_at', '时间'], ['email', '成员'], ['hostname', '设备'],
-        ['tool_name', '工具'], ['repo', '仓库'], ['file_path', '文件'],
-        ['bash_command', '命令'], ['lines_changed', '改动行数'],
-      ]))
-    } else {
-      downloadCSV(tab === 'blocked' ? 'blocked.csv' : 'distributions.csv',
-        toCSV(dist.data?.entries ?? [], [
-          ['created_at', '时间'], ['email', '成员'], ['hostname', '设备'],
-          ['bundle_name', '内容'], ['version', '版本'], ['action', '动作'], ['detail', '详情'],
-        ]))
-    }
-  }
+function Info({ children }: { children: React.ReactNode }) { return <div className="mb-4 flex gap-2 rounded-lg border bg-card px-4 py-3 text-sm text-muted-foreground"><ShieldAlert className="mt-0.5 size-4 shrink-0 text-primary" />{children}</div> }
 
-  return (
-    <>
-      <h1>审计</h1>
-      <p className="sub">谁在什么时候拿到了哪个版本，以及谁掉了队</p>
-      <div className="row" style={{ marginBottom: 10 }}>
-        <div className="spacer" />
-        <button className="btn" onClick={exportCSV}>导出 CSV</button>
-      </div>
-      <div className="tabs">
-        <button className={tab === 'all' ? 'active' : ''} onClick={() => setTab('all')}>分发记录</button>
-        <button className={tab === 'exec' ? 'active' : ''} onClick={() => setTab('exec')}>执行记录</button>
-        <button className={tab === 'blocked' ? 'active' : ''} onClick={() => setTab('blocked')}>下发受阻</button>
-        <button className={tab === 'stale' ? 'active' : ''} onClick={() => setTab('stale')}>长期未同步</button>
-      </div>
+function useAuditState() {
+  const [tab, setTab] = React.useState<Tab>('all'); const dist = useAsync(() => api.audit(tab === 'blocked' ? 'conflict_skipped' : undefined), [tab]); const exec = useAsync(() => api.executions(), [tab]); const stale = useAsync(() => api.staleMachines(), [tab])
+  function exportCSV() { if (tab === 'stale') downloadCSV('stale-machines.csv', toCSV(stale.data?.machines ?? [], [['email','成员'],['hostname','设备'],['last_seen_at','最后活跃'],['days','已停(天)'],['user_level','用户级掉队']])); else if (tab === 'exec') { const rows = (exec.data?.entries ?? []).map((e) => ({ occurred_at:e.occurred_at,email:e.email,hostname:e.hostname,tool_name:e.tool_name ?? e.event_type,repo:e.summary.repo ?? '',file_path:e.summary.file_path ?? '',bash_command:e.summary.bash_command ?? '',lines_changed:e.summary.lines_changed ?? '' })); downloadCSV('executions.csv', toCSV(rows, [['occurred_at','时间'],['email','成员'],['hostname','设备'],['tool_name','工具'],['repo','仓库'],['file_path','文件'],['bash_command','命令'],['lines_changed','改动行数']])) } else downloadCSV(tab === 'blocked' ? 'blocked.csv' : 'distributions.csv', toCSV(dist.data?.entries ?? [], [['created_at','时间'],['email','成员'],['hostname','设备'],['bundle_name','内容'],['version','版本'],['action','动作'],['detail','详情']])) }
+  return { tab, setTab, dist, exec, stale, exportCSV }
+}
 
-      {tab === 'blocked' && (
-        <p className="sub">
-          目标路径已被员工自有的同名内容占用，因此跳过、且未做任何改动。
-          没有这张表，「从未分配」和「一直装不上」在审计里长得一模一样。
-        </p>
-      )}
-      {tab === 'stale' && (
-        <p className="sub">
-          <strong>用户级</strong>表示该成员所有设备都掉队，可能已离职未处理；
-          仅部分设备掉队通常只是换机或闲置。
-        </p>
-      )}
-
-      {tab === 'exec' && (
-        <p className="sub">
-          只记录元数据：谁、何时、用什么工具、动了哪个仓库的哪个文件。
-          <strong>文件内容、diff、完整命令行、提示词一律不上报。</strong>
-        </p>
-      )}
-
-      {tab === 'exec' ? (
-        <>
-          <Err msg={exec.err} />
-          {!exec.data?.entries?.length ? <Empty>暂无执行记录</Empty> : (
-            <table>
-              <thead><tr><th>时间</th><th>成员</th><th>工具</th><th>动作</th></tr></thead>
-              <tbody>
-                {exec.data.entries.map((e, i) => (
-                  <tr key={i}>
-                    <td className="muted">{fmtTime(e.occurred_at)}</td>
-                    <td>{e.email}<div className="muted">{e.hostname || '—'}</div></td>
-                    <td><span className="tag">{e.tool_name || e.event_type}</span></td>
-                    <td>
-                      {e.summary.file_path ? (
-                        <>
-                          改了 <code>{e.summary.file_path}</code>
-                          {e.summary.lines_changed ? <span className="muted"> · {e.summary.lines_changed} 行</span> : null}
-                        </>
-                      ) : e.summary.bash_command ? (
-                        <>执行 <code>{e.summary.bash_command}</code></>
-                      ) : <span className="muted">—</span>}
-                      {e.summary.repo && <div className="muted">{e.summary.repo}</div>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </>
-      ) : tab === 'stale' ? (
-        <>
-          <Err msg={stale.err} />
-          {!stale.data?.machines?.length ? <Empty>没有掉队的设备</Empty> : (
-            <table>
-              <thead><tr><th>成员</th><th>设备</th><th>最后活跃</th><th>已停</th><th>范围</th></tr></thead>
-              <tbody>
-                {stale.data.machines.map((m, i) => (
-                  <tr key={i}>
-                    <td>{m.email}</td>
-                    <td className="muted">{m.hostname || '—'}</td>
-                    <td className="muted">{fmtTime(m.last_seen_at)}</td>
-                    <td>{m.days} 天</td>
-                    <td>{m.user_level
-                      ? <span className="tag danger">用户级</span>
-                      : <span className="tag">设备级</span>}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </>
-      ) : (
-        <>
-          <Err msg={dist.err} />
-          {!dist.data?.entries?.length ? <Empty>暂无记录</Empty> : (
-            <table>
-              <thead><tr><th>时间</th><th>成员</th><th>设备</th><th>内容</th><th>动作</th></tr></thead>
-              <tbody>
-                {dist.data.entries.map((e, i) => (
-                  <tr key={i}>
-                    <td className="muted">{fmtTime(e.created_at)}</td>
-                    <td>{e.email}</td>
-                    <td className="muted">{e.hostname || '—'}</td>
-                    <td>{e.bundle_name} <span className="muted">v{e.version}</span></td>
-                    <td>
-                      <span className={`tag ${e.action === 'conflict_skipped' ? 'warn' : e.action === 'remove' ? 'danger' : ''}`}>
-                        {e.action}
-                      </span>
-                      {e.detail && <div className="muted">{e.detail}</div>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </>
-      )}
-    </>
-  )
+function AuditContent({ tab, dist, exec, stale }: ReturnType<typeof useAuditState>) {
+  if (tab === 'exec') return <><Err msg={exec.err} />{exec.loading ? <TableSkeleton /> : !exec.data?.entries.length ? <Empty>暂无执行记录</Empty> : <Card className="overflow-hidden"><Table><TableHeader><TableRow><TableHead>时间</TableHead><TableHead>成员 / 设备</TableHead><TableHead>工具</TableHead><TableHead>动作</TableHead></TableRow></TableHeader><TableBody>{exec.data.entries.map((e,i) => <TableRow key={i}><TableCell className="whitespace-nowrap text-muted-foreground">{fmtTime(e.occurred_at)}</TableCell><TableCell>{e.email}<div className="text-xs text-muted-foreground">{e.hostname || '—'}</div></TableCell><TableCell><Badge>{e.tool_name || e.event_type}</Badge></TableCell><TableCell>{e.summary.file_path ? <>修改 <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{e.summary.file_path}</code>{e.summary.lines_changed ? <span className="text-muted-foreground"> · {e.summary.lines_changed} 行</span> : null}</> : e.summary.bash_command ? <>执行 <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{e.summary.bash_command}</code></> : <span className="text-muted-foreground">—</span>}{e.summary.repo && <div className="mt-1 text-xs text-muted-foreground">{e.summary.repo}</div>}</TableCell></TableRow>)}</TableBody></Table></Card>}</>
+  if (tab === 'stale') return <><Err msg={stale.err} />{stale.loading ? <TableSkeleton /> : !stale.data?.machines.length ? <Empty>没有掉队的设备</Empty> : <Card className="overflow-hidden"><Table><TableHeader><TableRow><TableHead>成员</TableHead><TableHead>设备</TableHead><TableHead>最后活跃</TableHead><TableHead>已停</TableHead><TableHead>范围</TableHead></TableRow></TableHeader><TableBody>{stale.data.machines.map((m,i) => <TableRow key={i}><TableCell>{m.email}</TableCell><TableCell className="font-mono text-xs text-muted-foreground">{m.hostname || '—'}</TableCell><TableCell className="whitespace-nowrap text-muted-foreground">{fmtTime(m.last_seen_at)}</TableCell><TableCell>{m.days} 天</TableCell><TableCell>{m.user_level ? <Badge variant="destructive">用户级</Badge> : <Badge>设备级</Badge>}</TableCell></TableRow>)}</TableBody></Table></Card>}</>
+  return <><Err msg={dist.err} />{dist.loading ? <TableSkeleton /> : !dist.data?.entries.length ? <Empty>暂无记录</Empty> : <Card className="overflow-hidden"><Table><TableHeader><TableRow><TableHead>时间</TableHead><TableHead>成员 / 设备</TableHead><TableHead>内容</TableHead><TableHead>动作</TableHead></TableRow></TableHeader><TableBody>{dist.data.entries.map((e,i) => <TableRow key={i}><TableCell className="whitespace-nowrap text-muted-foreground">{fmtTime(e.created_at)}</TableCell><TableCell>{e.email}<div className="font-mono text-xs text-muted-foreground">{e.hostname || '—'}</div></TableCell><TableCell>{e.bundle_name} <span className="font-mono text-xs text-muted-foreground">v{e.version}</span></TableCell><TableCell><Badge variant={e.action === 'conflict_skipped' ? 'warning' : e.action === 'remove' ? 'destructive' : 'success'}>{e.action}</Badge>{e.detail && <div className="mt-1 text-xs text-muted-foreground">{e.detail}</div>}</TableCell></TableRow>)}</TableBody></Table></Card>}</>
 }

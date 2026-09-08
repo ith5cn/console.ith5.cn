@@ -1,4 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
+import { AlertCircle, Inbox } from 'lucide-react'
+import { Card } from '@/components/ui/card'
+import { Skeleton } from '@/components/ui/skeleton'
 
 export function useAsync<T>(fn: () => Promise<T>, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null)
@@ -21,11 +24,19 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[] = []) {
 }
 
 export function Err({ msg }: { msg: string }) {
-  return msg ? <div className="err">{msg}</div> : null
+  return msg ? <div role="alert" className="mt-3 flex items-start gap-2 rounded-md bg-red-50 px-3 py-2 text-sm text-destructive"><AlertCircle className="mt-0.5 size-4 shrink-0" />{msg}</div> : null
 }
 
 export function Empty({ children }: { children: ReactNode }) {
-  return <div className="empty">{children}</div>
+  return <Card className="grid min-h-40 place-items-center border-dashed p-8 text-center text-muted-foreground"><div><Inbox className="mx-auto mb-3 size-7 opacity-60" />{children}</div></Card>
+}
+
+export function PageHeader({ title, description, action }: { title: string; description: ReactNode; action?: ReactNode }) {
+  return <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start"><div className="min-w-0"><h1 className="text-2xl font-semibold tracking-[-.03em]">{title}</h1><div className="mt-1.5 max-w-3xl text-sm leading-6 text-muted-foreground">{description}</div></div>{action && <div className="sm:ml-auto">{action}</div>}</div>
+}
+
+export function TableSkeleton({ rows = 4 }: { rows?: number }) {
+  return <Card className="overflow-hidden p-4"><Skeleton className="mb-4 h-8 w-48" />{Array.from({ length: rows }).map((_, i) => <Skeleton key={i} className="mb-2 h-12 w-full" />)}</Card>
 }
 
 export function fmtTime(s?: string) {
@@ -40,8 +51,8 @@ export function Via({ via }: { via: { subject_type: string; group_name?: string 
     <>
       {via.map((v, i) =>
         v.group_name
-          ? <span key={i} className="tag group">{v.group_name}</span>
-          : <span key={i} className="tag">直接授权 · {v.subject_type}</span>,
+          ? <span key={i} className="mr-1 inline-flex rounded-full bg-accent px-2 py-0.5 text-xs font-medium text-accent-foreground">{v.group_name}</span>
+          : <span key={i} className="mr-1 inline-flex rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">直接授权 · {v.subject_type}</span>,
       )}
     </>
   )
