@@ -48,6 +48,40 @@
   .focus-ring { @apply outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background; }
 }
 
+.workflow-flow .react-flow__renderer,
+.workflow-flow .react-flow__pane,
+.workflow-flow .react-flow__node {
+  cursor: default;
+}
+
+.workflow-flow .workflow-handle {
+  width: 6px;
+  height: 6px;
+  border: 0;
+  background: #67d8ed;
+  box-shadow: 0 0 10px rgb(103 216 237 / 75%);
+}
+
+.workflow-flow .workflow-handle-feedback {
+  background: #b56886;
+  box-shadow: 0 0 10px rgb(181 104 134 / 65%);
+}
+
+.workflow-flow .workflow-edge.animated path {
+  stroke-dasharray: 7 9;
+  animation-duration: 1.15s;
+  filter: drop-shadow(0 0 4px rgb(103 216 237 / 55%));
+}
+
+.workflow-flow .workflow-edge-feedback path {
+  filter: drop-shadow(0 0 3px rgb(181 104 134 / 35%));
+}
+
+.workflow-flow .react-flow__edge-textbg {
+  rx: 5px;
+  ry: 5px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
 }
