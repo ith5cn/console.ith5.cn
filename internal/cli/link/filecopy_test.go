@@ -23,6 +23,15 @@ func fixture(t *testing.T) (storeRoot, staging, agents string) {
 	return
 }
 
+// sc 组装该 bundle 的 store 侧信息。
+func sc(storeRoot, name string) StoreCtx {
+	return StoreCtx{
+		Root:      storeRoot,
+		BundleDir: filepath.Join(storeRoot, name),
+		EntryFile: core.AgentFile,
+	}
+}
+
 func writeVersion(t *testing.T, storeRoot, name, sum, content string) string {
 	t.Helper()
 	dir := filepath.Join(storeRoot, name, sum)
@@ -41,14 +50,14 @@ func TestFileCopy_物化后归属为我方(t *testing.T) {
 	c := FileCopy{Staging: staging, StoreRoot: storeRoot}
 	target := filepath.Join(agents, "ag.md")
 
-	if err := c.Materialize(dir, target, MarkerData{}); err != nil {
+	if err := c.Materialize(dir, target, MarkerData{}, sc(storeRoot, "ag")); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(target)
 	if err != nil || string(b) != "---\nname: ag\n---\nv1\n" {
 		t.Fatalf("内容不对: %q %v", b, err)
 	}
-	info, err := c.Inspect(target, storeRoot)
+	info, err := c.Inspect(target, sc(storeRoot, "ag"))
 	if err != nil || info.Ownership != OwnMine {
 		t.Fatalf("应判为我方所有，实际 %v %v", info.Ownership, err)
 	}
@@ -69,17 +78,17 @@ func TestFileCopy_更新直接覆盖且无需trash(t *testing.T) {
 	c := FileCopy{Staging: staging, StoreRoot: storeRoot}
 	target := filepath.Join(agents, "ag.md")
 
-	if err := c.Materialize(v1, target, MarkerData{}); err != nil {
+	if err := c.Materialize(v1, target, MarkerData{}, sc(storeRoot, "ag")); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Materialize(v2, target, MarkerData{}); err != nil {
+	if err := c.Materialize(v2, target, MarkerData{}, sc(storeRoot, "ag")); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(target)
 	if string(b) != "v2" {
 		t.Fatalf("应更新为 v2，实际 %q", b)
 	}
-	info, _ := c.Inspect(target, storeRoot)
+	info, _ := c.Inspect(target, sc(storeRoot, "ag"))
 	if info.StoreDir != v2 {
 		t.Fatalf("应命中 v2 的版本目录，实际 %q", info.StoreDir)
 	}
@@ -93,12 +102,12 @@ func TestFileCopy_回滚命中已有内容(t *testing.T) {
 	c := FileCopy{Staging: staging, StoreRoot: storeRoot}
 	target := filepath.Join(agents, "ag.md")
 
-	_ = c.Materialize(v1, target, MarkerData{})
-	_ = c.Materialize(v2, target, MarkerData{})
-	if err := c.Materialize(v1, target, MarkerData{}); err != nil {
+	_ = c.Materialize(v1, target, MarkerData{}, sc(storeRoot, "ag"))
+	_ = c.Materialize(v2, target, MarkerData{}, sc(storeRoot, "ag"))
+	if err := c.Materialize(v1, target, MarkerData{}, sc(storeRoot, "ag")); err != nil {
 		t.Fatal(err)
 	}
-	info, _ := c.Inspect(target, storeRoot)
+	info, _ := c.Inspect(target, sc(storeRoot, "ag"))
 	if info.Ownership != OwnMine || info.StoreDir != v1 {
 		t.Fatalf("回滚后应命中 v1：%v %q", info.Ownership, info.StoreDir)
 	}
@@ -111,7 +120,7 @@ func TestFileCopy_用户自建判为重名(t *testing.T) {
 	target := filepath.Join(agents, "mine.md")
 	os.WriteFile(target, []byte("我自己写的"), 0o644)
 
-	info, err := c.Inspect(target, storeRoot)
+	info, err := c.Inspect(target, sc(storeRoot, "ag"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,11 +136,11 @@ func TestFileCopy_本地改动判为改动而非重名(t *testing.T) {
 	dir := writeVersion(t, storeRoot, "ag", "aaaa", "原文")
 	c := FileCopy{Staging: staging, StoreRoot: storeRoot}
 	target := filepath.Join(agents, "ag.md")
-	_ = c.Materialize(dir, target, MarkerData{})
+	_ = c.Materialize(dir, target, MarkerData{}, sc(storeRoot, "ag"))
 
 	os.WriteFile(target, []byte("原文\n员工加的一行"), 0o644)
 
-	info, _ := c.Inspect(target, storeRoot)
+	info, _ := c.Inspect(target, sc(storeRoot, "ag"))
 	if info.Ownership != OwnForeign {
 		t.Fatal("改过的文件必须判为用户自有，绝不能被覆盖")
 	}
@@ -147,8 +156,8 @@ func TestFileCopy_Release只删我方(t *testing.T) {
 	c := FileCopy{Staging: staging, StoreRoot: storeRoot}
 
 	mine := filepath.Join(agents, "ag.md")
-	_ = c.Materialize(dir, mine, MarkerData{})
-	if err := c.Release(mine); err != nil {
+	_ = c.Materialize(dir, mine, MarkerData{}, sc(storeRoot, "ag"))
+	if err := c.Release(mine, sc(storeRoot, "ag")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(mine); !os.IsNotExist(err) {
@@ -158,7 +167,7 @@ func TestFileCopy_Release只删我方(t *testing.T) {
 	// 用户自建的
 	theirs := filepath.Join(agents, "theirs.md")
 	os.WriteFile(theirs, []byte("别动我"), 0o644)
-	if err := c.Release(theirs); err == nil {
+	if err := c.Release(theirs, sc(storeRoot, "ag")); err == nil {
 		t.Fatal("必须拒绝删除用户自有文件")
 	}
 	if b, _ := os.ReadFile(theirs); string(b) != "别动我" {
@@ -167,9 +176,9 @@ func TestFileCopy_Release只删我方(t *testing.T) {
 
 	// 被改过的我方文件：撤权也不擦除（PRD：切断续期，不保证擦除）
 	modified := filepath.Join(agents, "ag.md")
-	_ = c.Materialize(dir, modified, MarkerData{})
+	_ = c.Materialize(dir, modified, MarkerData{}, sc(storeRoot, "ag"))
 	os.WriteFile(modified, []byte("原文+改动"), 0o644)
-	if err := c.Release(modified); err == nil {
+	if err := c.Release(modified, sc(storeRoot, "ag")); err == nil {
 		t.Fatal("被改过的文件不该被删除")
 	}
 	if b, _ := os.ReadFile(modified); string(b) != "原文+改动" {
@@ -187,11 +196,11 @@ func TestFileCopy_Release不碰store(t *testing.T) {
 	if err := os.Symlink(filepath.Join(dir, core.AgentFile), target); err != nil {
 		t.Skipf("本平台不支持符号链接: %v", err)
 	}
-	info, _ := c.Inspect(target, storeRoot)
+	info, _ := c.Inspect(target, sc(storeRoot, "ag"))
 	if info.Ownership != OwnMine || info.StoreDir != dir {
 		t.Fatalf("软链应判为我方并反推出版本目录：%v %q", info.Ownership, info.StoreDir)
 	}
-	if err := c.Release(target); err != nil {
+	if err := c.Release(target, sc(storeRoot, "ag")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, core.AgentFile)); err != nil {

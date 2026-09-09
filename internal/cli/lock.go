@@ -12,10 +12,10 @@ import (
 	"github.com/ith5/ith5/internal/core"
 )
 
-// lockVersion 3 起记录 shape。旧版 lock 会被判为损坏并自动重建
-// ——lock 是缓存不是真相，重建本就是设计好的路径（技术方案 §8.8），
-// 因此升级不需要迁移代码。
-const lockVersion = 3
+// lockVersion 4 起以 kind/name 为键（3 只用 name，同名不同 kind 会互相覆盖）。
+// 旧版 lock 会被判为损坏并自动重建 ——lock 是缓存不是真相，重建本就是
+// 设计好的路径（技术方案 §8.8），因此升级不需要迁移代码。
+const lockVersion = 4
 
 // Lock 是本地已装内容的账本。
 //
@@ -23,16 +23,16 @@ const lockVersion = 3
 // marker）就能反推出「这个入口属于哪个 bundle 的哪份内容」，因此
 // lock 丢失或损坏时可自动重建，不再需要人工恢复。
 type Lock struct {
-	Version    int                       `json:"version"`
-	Server     string                    `json:"server"`
-	SyncedAt   time.Time                 `json:"synced_at"`
-	TTLSeconds int                       `json:"ttl_seconds"`
-	Strategy   string                    `json:"strategy"`
-	Bundles    map[string]core.LockEntry `json:"bundles"`
+	Version    int                         `json:"version"`
+	Server     string                      `json:"server"`
+	SyncedAt   time.Time                   `json:"synced_at"`
+	TTLSeconds int                         `json:"ttl_seconds"`
+	Strategy   string                      `json:"strategy"`
+	Bundles    map[core.Ref]core.LockEntry `json:"bundles"`
 }
 
 func NewLock(server string) *Lock {
-	return &Lock{Version: lockVersion, Server: server, Bundles: map[string]core.LockEntry{}}
+	return &Lock{Version: lockVersion, Server: server, Bundles: map[core.Ref]core.LockEntry{}}
 }
 
 // Expired 判断是否超过 TTL，供 SessionStart 决定要不要触发后台 sync。
@@ -73,86 +73,134 @@ func (l *Lock) Save(path string) error {
 	return os.Rename(tmp, path)
 }
 
-// Rebuild 扫描 skills 目录，由指针与 marker 反推出 lock。
+// Rebuild 扫描各 kind 的根目录，由指针与 marker 反推出 lock。
 //
 // 这使得 lock 损坏时**自动恢复**，而不是像 v1.0 设计的那样进入只读
 // 保护模式等人工处理（技术方案 §8.8）。
 //
-// 反推的依据是路径本身：store/<bundle>/<checksum前16位>。
+// 反推的依据是路径本身：store/<kind>/<bundle>/<checksum前16位>。
 //
 // 注意**内容目录不携带版本号**，也不能携带——内容寻址意味着同一个目录
 // 被多个版本共享（回滚正是如此：新旧版本 checksum 相同）。版本号由
 // sync 在拿到 manifest 后按 checksum 对照补齐。
 func (l *Lock) Rebuild(p Paths, s Resolver) (int, error) {
 	n := 0
-	// 目录形态：skills/<name>/
-	dirN, err := l.rebuildShape(p, s, core.ShapeDir, p.Skills, func(e os.DirEntry) (string, bool) {
-		name := e.Name()
-		if strings.HasPrefix(name, ".") {
-			return "", false
+	// 按**根目录**扫，而不是按 kind 扫。
+	//
+	// skill 与 command 共用 skills/ 且落盘形态完全相同——按 kind 扫会
+	// 把同一个入口认领两次，产生两条互相矛盾的 lock 记录：manifest 里
+	// 只有其中一个 kind，另一个就成了「lock 有、manifest 无」，
+	// 下一次 sync 会先装好再把它删掉。
+	//
+	// 真实的 kind 从内容目录的路径（store/<kind>/<name>/<sum>）或 marker
+	// 里读回来，那才是物化当时记下的事实。
+	for _, r := range p.scanRoots() {
+		cnt, err := l.rebuildRoot(p, s, r)
+		if err != nil {
+			return n, err
 		}
-		return name, true
-	})
-	if err != nil {
-		return n, err
+		n += cnt
 	}
-	n += dirN
-
-	// 文件形态：agents/<name>.md
-	fileN, err := l.rebuildShape(p, s, core.ShapeFile, p.Agents, func(e os.DirEntry) (string, bool) {
-		name := e.Name()
-		if strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".md") || e.IsDir() {
-			return "", false
-		}
-		return strings.TrimSuffix(name, ".md"), true
-	})
-	if err != nil {
-		return n, err
-	}
-	return n + fileN, nil
+	return n, nil
 }
 
-func (l *Lock) rebuildShape(
-	p Paths, s Resolver, shape core.Shape, dir string,
-	nameOf func(os.DirEntry) (string, bool),
-) (int, error) {
-	entries, err := os.ReadDir(dir)
+// scanRoot 是一个待扫描的目标根目录。
+type scanRoot struct {
+	dir string
+	// probe 只用来决定「怎么扫、怎么判归属」——形态、扩展名与 store
+	// 入口文件名。同一根目录下所有 kind 的这三项必然一致。
+	probe core.Kind
+}
+
+// scanRoots 返回去重后的根目录列表。
+func (p Paths) scanRoots() []scanRoot {
+	seen := map[string]bool{}
+	var out []scanRoot
+	for _, k := range core.AllKinds {
+		root := k.Root()
+		if root == "" || seen[root] {
+			// 合并形态没有独立入口，无法从文件系统反推，只能依赖 lock 本身。
+			// lock 丢了就当作从未安装：下次 sync 会重新判定用户 JSON 里
+			// 那几个键的归属，判不出是我方的就报冲突，不会误改用户配置。
+			continue
+		}
+		seen[root] = true
+		out = append(out, scanRoot{dir: filepath.Join(p.ClaudeHome, root), probe: k})
+	}
+	return out
+}
+
+func (l *Lock) rebuildRoot(p Paths, s Resolver, r scanRoot) (int, error) {
+	entries, err := os.ReadDir(r.dir)
 	if os.IsNotExist(err) {
 		return 0, nil
 	}
 	if err != nil {
 		return 0, err
 	}
+	shape := r.probe.Shape()
+	ext := r.probe.Ext()
 	n := 0
 	for _, e := range entries {
-		name, ok := nameOf(e)
-		if !ok {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
 			continue
 		}
-		target := p.Target(shape, name)
-		info, err := s.For(shape).Inspect(target, p.Store)
+		if shape == core.ShapeFile {
+			if e.IsDir() || !strings.HasSuffix(name, ext) {
+				continue
+			}
+			name = strings.TrimSuffix(name, ext)
+		}
+		target := p.Target(r.probe, name)
+		info, err := s.For(shape).Inspect(target, p.StoreCtx(r.probe, name))
 		if err != nil || info.Ownership != core.OwnMine {
 			continue
 		}
-		entry := core.LockEntry{Target: target, Shape: shape}
+
+		kind := r.probe
+		entry := core.LockEntry{Name: name, Target: target, Shape: shape}
 		switch {
 		case info.Marker != nil:
-			// copy 策略（目录形态）：marker 是一次物化的记录，信息最全（含版本号）
+			// copy 策略（目录形态）：marker 是一次物化的记录，信息最全（含版本号与 kind）
+			if k := core.Kind(info.Marker.Kind); k.Valid() {
+				kind = k
+			}
 			entry.BundleID = info.Marker.BundleID
 			entry.Version = info.Marker.Version
 			entry.Checksum = info.Marker.Checksum
-			entry.Store = filepath.Join(p.Store, name, core.ShortSum(info.Marker.Checksum))
+			entry.Store = filepath.Join(p.StoreCtx(kind, name).BundleDir, core.ShortSum(info.Marker.Checksum))
 		case info.StoreDir != "":
 			// link 策略，或文件形态的内容比对命中：
-			// 由路径反推 bundle 名与内容摘要。版本号拿不到，
+			// 由路径反推 kind 与内容摘要。版本号拿不到，
 			// 留 0 由 sync 按 checksum 对照 manifest 补齐。
+			if k := kindFromStorePath(p.Store, info.StoreDir); k.Valid() {
+				kind = k
+			}
 			entry.Store = info.StoreDir
 			entry.ShortSum = filepath.Base(info.StoreDir)
 		}
-		l.Bundles[name] = entry
+		entry.Kind = kind
+		l.Bundles[core.MakeRef(kind, name)] = entry
 		n++
 	}
 	return n, nil
+}
+
+// kindFromStorePath 由 store/<kind>/<name>/<sum> 反推 kind。
+//
+// 这是 skill 与 command 唯一可靠的区分依据：两者在 claude_home 里
+// 长得一模一样，差别只存在于我们自己的 store 布局中。
+func kindFromStorePath(storeRoot, dir string) core.Kind {
+	rel, err := filepath.Rel(storeRoot, dir)
+	if err != nil {
+		return ""
+	}
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	if len(parts) < 1 {
+		return ""
+	}
+	return core.Kind(parts[0])
 }
 
 // Resolver 按形态给出策略，是 Rebuild 与 Ownerships 需要的最小能力。
@@ -163,20 +211,27 @@ type Resolver interface {
 
 // Ownerships 逐个探测目标归属，产出 core.Plan 需要的输入。
 //
-// shapes 给出每个名字的形态。缺失的按目录形态处理——那是 lock 里
-// 没记 shape 的旧条目，重建会补上。
-func Ownerships(p Paths, s Resolver, names []string, shapes map[string]core.Shape) (map[string]core.Ownership, error) {
-	out := make(map[string]core.Ownership, len(names))
-	for _, n := range names {
-		shape := shapes[n]
-		if shape == "" {
-			shape = core.ShapeDir
+// refs 是 kind/name，kind 直接给出形态、目标路径与 store 入口文件名，
+// 因此不再需要外部传入 shape 表。
+func Ownerships(p Paths, s Resolver, m *Merger, refs []core.Ref, lock *Lock) (map[core.Ref]core.Ownership, error) {
+	out := make(map[core.Ref]core.Ownership, len(refs))
+	for _, ref := range refs {
+		kind, name := ref.Split()
+		if kind.Shape() == core.ShapeMerge {
+			// 合并形态没有入口可 lstat，归属只能靠「用户 JSON 里那几个键
+			// 的当前值是否仍等于我方上次写入的值」来判（见 merge.go）。
+			own, err := m.Inspect(kind, lock.Bundles[ref])
+			if err != nil {
+				return nil, fmt.Errorf("探测 %s: %w", ref, err)
+			}
+			out[ref] = own
+			continue
 		}
-		info, err := s.For(shape).Inspect(p.Target(shape, n), p.Store)
+		info, err := s.For(kind.Shape()).Inspect(p.Target(kind, name), p.StoreCtx(kind, name))
 		if err != nil {
-			return nil, fmt.Errorf("探测 %s: %w", n, err)
+			return nil, fmt.Errorf("探测 %s: %w", ref, err)
 		}
-		out[n] = info.Ownership
+		out[ref] = info.Ownership
 	}
 	return out, nil
 }

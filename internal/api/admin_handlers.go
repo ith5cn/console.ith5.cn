@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -136,7 +137,12 @@ func (s *Server) adminCreateBundle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !core.Kind(req.Kind).Valid() {
-		s.fail(w, r, http.StatusBadRequest, "bad_request", "kind 必须是 skill、command 或 agent")
+		kinds := make([]string, len(core.AllKinds))
+		for i, k := range core.AllKinds {
+			kinds[i] = string(k)
+		}
+		s.fail(w, r, http.StatusBadRequest, "bad_request",
+			"kind 必须是以下之一："+strings.Join(kinds, "、"))
 		return
 	}
 	id, err := s.db.CreateBundle(r.Context(), p.OrgID, req.Name, req.Kind, req.Description, req.Content)

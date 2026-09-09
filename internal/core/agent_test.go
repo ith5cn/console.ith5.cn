@@ -24,7 +24,7 @@ func TestKind_形态映射(t *testing.T) {
 		if got := c.kind.Shape(); got != c.shape {
 			t.Errorf("%s 的形态应为 %s，实际 %s", c.kind, c.shape, got)
 		}
-		if got := c.kind.Shape().EntryFile(); got != c.entry {
+		if got := c.kind.EntryFile(); got != c.entry {
 			t.Errorf("%s 的入口文件应为 %s，实际 %s", c.kind, c.entry, got)
 		}
 	}
@@ -61,7 +61,7 @@ func TestValidateFiles_agent只能一个文件(t *testing.T) {
 }
 
 func TestValidateFiles_未知kind被拒(t *testing.T) {
-	if err := ValidateFiles(Kind("hook"), agentFiles("x")); !errors.Is(err, ErrBadKind) {
+	if err := ValidateFiles(Kind("plugin"), agentFiles("x")); !errors.Is(err, ErrBadKind) {
 		t.Fatalf("未知 kind 必须被拒，实际 %v", err)
 	}
 }
@@ -117,11 +117,11 @@ func TestSeedSkillMD_agent自带name(t *testing.T) {
 
 // remove 的形态取自 lock 的显式记录：manifest 里已经没有它了，无从反推。
 func TestPlan_remove用lock记录的形态(t *testing.T) {
-	lock := map[string]LockEntry{
-		"gone-agent": {BundleID: "b1", Kind: KindAgent, Shape: ShapeFile, Version: 1, Checksum: "c1"},
-		"gone-skill": {BundleID: "b2", Kind: KindSkill, Shape: ShapeDir, Version: 1, Checksum: "c2"},
+	lock := map[Ref]LockEntry{
+		"agent/gone-agent": {BundleID: "b1", Kind: KindAgent, Shape: ShapeFile, Version: 1, Checksum: "c1"},
+		"skill/gone-skill": {BundleID: "b2", Kind: KindSkill, Shape: ShapeDir, Version: 1, Checksum: "c2"},
 	}
-	items := Plan(nil, lock, map[string]Ownership{"gone-agent": OwnMine, "gone-skill": OwnMine})
+	items := Plan(nil, lock, map[Ref]Ownership{"agent/gone-agent": OwnMine, "skill/gone-skill": OwnMine})
 	got := map[string]Shape{}
 	for _, it := range items {
 		if it.Action != ActionRemove {
@@ -136,10 +136,10 @@ func TestPlan_remove用lock记录的形态(t *testing.T) {
 
 // 旧版 lock 没有 shape 字段时回退到按 kind 推，不能留空。
 func TestPlan_旧lock缺shape时回退(t *testing.T) {
-	lock := map[string]LockEntry{
-		"old": {BundleID: "b1", Kind: KindAgent, Version: 1, Checksum: "c1"},
+	lock := map[Ref]LockEntry{
+		"agent/old": {BundleID: "b1", Kind: KindAgent, Version: 1, Checksum: "c1"},
 	}
-	items := Plan(nil, lock, map[string]Ownership{"old": OwnMine})
+	items := Plan(nil, lock, map[Ref]Ownership{"agent/old": OwnMine})
 	if items[0].Shape != ShapeFile {
 		t.Fatalf("缺 shape 应按 kind 回退为 file，实际 %q", items[0].Shape)
 	}
@@ -150,7 +150,7 @@ func TestPlan_manifest项按kind定形态(t *testing.T) {
 		{ID: "b1", Name: "ag", Kind: KindAgent, Version: 1, Checksum: "c1"},
 		{ID: "b2", Name: "sk", Kind: KindSkill, Version: 1, Checksum: "c2"},
 	}
-	items := Plan(metas, map[string]LockEntry{}, map[string]Ownership{})
+	items := Plan(metas, map[Ref]LockEntry{}, map[Ref]Ownership{})
 	for _, it := range items {
 		want := ShapeDir
 		if it.Name == "ag" {

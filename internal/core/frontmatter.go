@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -96,7 +97,7 @@ func ValidateForPublish(kind Kind, bundleName string, files []File) error {
 	if err := ValidateFiles(kind, files); err != nil {
 		return err
 	}
-	entry := kind.Shape().EntryFile()
+	entry := kind.EntryFile()
 	var content string
 	for _, f := range files {
 		if f.Path == entry {
@@ -104,11 +105,46 @@ func ValidateForPublish(kind Kind, bundleName string, files []File) error {
 			break
 		}
 	}
+	// JSON 形态没有 frontmatter，改校验它确实是一个可合并的对象。
+	// 放过一个语法错误的片段，症状是员工机器上 settings.json 合并失败，
+	// 而管理员这边显示「发布成功」——错误必须挡在发布口。
+	switch kind {
+	case KindSetting:
+		if _, err := parseJSONObject(content); err != nil {
+			return fmt.Errorf("%s: %w", entry, err)
+		}
+		return nil
+	case KindMCP:
+		obj, err := parseJSONObject(content)
+		if err != nil {
+			return fmt.Errorf("%s: %w", entry, err)
+		}
+		servers, ok := obj["mcpServers"].(map[string]any)
+		if !ok || len(servers) == 0 {
+			return fmt.Errorf("%s: %w", entry, ErrNoMCPServers)
+		}
+		return nil
+	case KindHook, KindWorkflow:
+		// 脚本没有 frontmatter 可言。内容是否可执行由运行时决定，
+		// 发布口挡不住，也不该假装能挡。
+		if strings.TrimSpace(content) == "" {
+			return fmt.Errorf("%s: 内容不能为空", entry)
+		}
+		return nil
+	}
+
 	fm, err := ParseFrontmatter(content)
 	if err != nil {
+		if kind == KindStandard {
+			// 规范文档是给人和模型读的散文，没有 frontmatter 也能用。
+			if strings.TrimSpace(content) == "" {
+				return fmt.Errorf("%s: 内容不能为空", entry)
+			}
+			return nil
+		}
 		return fmt.Errorf("%s: %w（至少需要 ---\\ndescription: ...\\n---）", entry, err)
 	}
-	if fm.Description == "" {
+	if fm.Description == "" && kind != KindStandard {
 		return fmt.Errorf("%s: %w", entry, ErrNoDescription)
 	}
 	switch kind {
@@ -150,6 +186,24 @@ func SeedSkillMD(kind Kind, bundleName, description string) string {
 	if description == "" {
 		description = "（请填写：这个技能做什么、什么时候该用它）"
 	}
+	// 非 Markdown 的几类各有自己的合法骨架，套 frontmatter 模板只会
+	// 让管理员在发布时才发现内容根本不是那个类型该有的样子。
+	switch kind {
+	case KindSetting:
+		return "{\n  \"env\": {\n    \"EXAMPLE\": \"值\"\n  }\n}\n"
+	case KindMCP:
+		return "{\n  \"mcpServers\": {\n    \"" + bundleName + "\": {\n" +
+			"      \"command\": \"npx\",\n      \"args\": [\"-y\", \"某个-mcp-server\"]\n" +
+			"    }\n  }\n}\n"
+	case KindHook:
+		return "#!/usr/bin/env node\n// " + description + "\n// 钩子从 stdin 读事件 JSON，向 stdout 写结果。\n"
+	case KindWorkflow:
+		return "export const meta = {\n  name: '" + bundleName + "',\n" +
+			"  description: '" + description + "',\n}\n"
+	case KindStandard:
+		return "# " + bundleName + "\n\n" + description + "\n"
+	}
+
 	var b strings.Builder
 	b.WriteString("---\n")
 	if kind == KindAgent {
@@ -176,4 +230,19 @@ func SeedSkillMD(kind Kind, bundleName, description string) string {
 		b.WriteString("在这里写下 Claude 应当遵循的指令。\n")
 	}
 	return b.String()
+}
+
+// parseJSONObject 解析 JSON 并要求顶层是对象。
+//
+// 顶层必须是对象而非数组：合并是按键进行的，数组没有键可合并。
+func parseJSONObject(content string) (map[string]any, error) {
+	var v any
+	if err := json.Unmarshal([]byte(content), &v); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrNotJSONObject, err)
+	}
+	obj, ok := v.(map[string]any)
+	if !ok {
+		return nil, ErrNotJSONObject
+	}
+	return obj, nil
 }

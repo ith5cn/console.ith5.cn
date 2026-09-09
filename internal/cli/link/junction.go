@@ -18,7 +18,7 @@ type Junction struct{}
 
 func (Junction) ID() string { return "junction" }
 
-func (j Junction) Materialize(storeDir, target string, _ MarkerData) error {
+func (j Junction) Materialize(storeDir, target string, _ MarkerData, _ StoreCtx) error {
 	abs, err := filepath.Abs(storeDir)
 	if err != nil {
 		return err
@@ -38,8 +38,8 @@ func (j Junction) Materialize(storeDir, target string, _ MarkerData) error {
 	return nil
 }
 
-func (Junction) Inspect(target, storeRoot string) (Info, error) {
-	return inspectPointer(target, storeRoot)
+func (Junction) Inspect(target string, sc StoreCtx) (Info, error) {
+	return inspectPointer(target, sc)
 }
 
 // Release 删除联接本身。
@@ -47,7 +47,7 @@ func (Junction) Inspect(target, storeRoot string) (Info, error) {
 // ⚠️ Windows 上 junction 在 API 层被视为目录。用错 API 可能**递归删入
 // 目标**，即清空 ~/.ith5/store。os.Remove 对 junction 会调用
 // RemoveDirectory，只摘掉重解析点，不触碰目标内容。
-func (Junction) Release(target string) error {
+func (Junction) Release(target string, _ StoreCtx) error {
 	fi, err := os.Lstat(target)
 	if os.IsNotExist(err) {
 		return nil

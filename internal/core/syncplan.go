@@ -39,7 +39,10 @@ const (
 // lock 是缓存而非真相，可由指针或 marker 重建。
 type LockEntry struct {
 	BundleID string `json:"id"`
-	Kind     Kind   `json:"kind"`
+	// Name 与 Kind 一起构成 Ref。Ref 已经是 map 的键，这里再记一份，
+	// 是因为 remove 路径要用它拼目标路径，而那时 manifest 里已经没有这条了。
+	Name string `json:"name"`
+	Kind Kind   `json:"kind"`
 	// Shape 必须显式记录，不能由 Kind 反推（技术方案 §8.8）：
 	// 二者今天一一对应，但 Kind 是服务端的展示概念、Shape 是客户端的落盘契约。
 	// 少记这个字段，Release 就得靠 Kind 猜该 unlink 还是 rmdir——
@@ -49,6 +52,10 @@ type LockEntry struct {
 	Checksum string `json:"checksum"`
 	Target   string `json:"target"`
 	Store    string `json:"store"`
+	// MergeKeys 仅合并形态有值：我方写进用户 JSON 文件的顶层键。
+	// 撤权时只删这些键，且只在它们的当前值仍等于我方写入值时删——
+	// 用户改过就留着并报冲突。不记这个，回收就只能靠猜。
+	MergeKeys []string `json:"merge_keys,omitempty"`
 	// ShortSum 仅在 lock 由指针重建、尚未与 manifest 对照时有值：
 	// 内容目录不携带版本号（同一目录被多个版本共享），因此重建只能
 	// 拿到摘要，版本号需按 checksum 对照 manifest 补齐（技术方案 §8.8）。
@@ -57,6 +64,8 @@ type LockEntry struct {
 
 // PlanItem 是同步计划中的一项。
 type PlanItem struct {
+	// Ref 是 kind/name，本项在 lock 与 ownership 里的键。
+	Ref      Ref
 	Name     string
 	Action   Action
 	BundleID string
@@ -79,16 +88,18 @@ type PlanItem struct {
 // 由指针的 readlink 或 copy 策略的 marker 反推）。Plan 收到的 lock
 // 应当已经是重建后的结果。因此 “有归属但无 lock 记录” 在这里是异常路径，
 // 按 update 兜底对齐到 manifest 版本。
-func Plan(manifest []BundleMeta, lock map[string]LockEntry, own map[string]Ownership) []PlanItem {
+func Plan(manifest []BundleMeta, lock map[Ref]LockEntry, own map[Ref]Ownership) []PlanItem {
 	items := make([]PlanItem, 0, len(manifest)+len(lock))
-	inManifest := make(map[string]bool, len(manifest))
+	inManifest := make(map[Ref]bool, len(manifest))
 
 	for _, m := range manifest {
-		inManifest[m.Name] = true
-		locked, hasLock := lock[m.Name]
-		ownership := own[m.Name]
+		ref := MakeRef(m.Kind, m.Name)
+		inManifest[ref] = true
+		locked, hasLock := lock[ref]
+		ownership := own[ref]
 
 		item := PlanItem{
+			Ref:      ref,
 			Name:     m.Name,
 			BundleID: m.ID,
 			Kind:     m.Kind,
@@ -125,12 +136,12 @@ func Plan(manifest []BundleMeta, lock map[string]LockEntry, own map[string]Owner
 	}
 
 	// lock 有、manifest 无 → 撤权或归档，执行 remove。
-	for name, l := range lock {
-		if inManifest[name] {
+	for ref, l := range lock {
+		if inManifest[ref] {
 			continue
 		}
 		action := ActionRemove
-		if own[name] == OwnForeign {
+		if own[ref] == OwnForeign {
 			// 目标已被用户占用，不碰它，只从 lock 里摘掉。
 			action = ActionConflict
 		}
@@ -140,7 +151,12 @@ func Plan(manifest []BundleMeta, lock map[string]LockEntry, own map[string]Owner
 		if shape == "" {
 			shape = l.Kind.Shape()
 		}
+		name := l.Name
+		if name == "" {
+			name = ref.Name()
+		}
 		items = append(items, PlanItem{
+			Ref:      ref,
 			Name:     name,
 			Action:   action,
 			BundleID: l.BundleID,
@@ -151,7 +167,7 @@ func Plan(manifest []BundleMeta, lock map[string]LockEntry, own map[string]Owner
 		})
 	}
 
-	sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
+	sort.Slice(items, func(i, j int) bool { return items[i].Ref < items[j].Ref })
 	return items
 }
 

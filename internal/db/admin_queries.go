@@ -76,10 +76,10 @@ func (d *DB) CreateBundle(ctx context.Context, orgID, name, kind, desc, content 
 	if content == "" {
 		content = core.SeedSkillMD(core.Kind(kind), name, desc)
 	}
-	// 入口文件名按形态定：目录形态是 SKILL.md，文件形态是 AGENT.md。
-	// 种错名字的话，管理员会在发布时才收到「必须包含 XXX.md」，
-	// 而那时他已经把正文写进了一个错名文件里。
-	entry := core.Kind(kind).Shape().EntryFile()
+	// 入口文件名按 kind 定：skill 是 SKILL.md，agent 是 AGENT.md，
+	// hook 是 HOOK.js，依此类推。种错名字的话，管理员会在发布时才收到
+	// 「必须包含 XXX」，而那时他已经把正文写进了一个错名文件里。
+	entry := core.Kind(kind).EntryFile()
 	draft, err := json.Marshal([]core.File{{Path: entry, Content: content}})
 	if err != nil {
 		return "", err

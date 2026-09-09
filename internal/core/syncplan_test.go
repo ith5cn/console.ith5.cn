@@ -21,8 +21,8 @@ func actionOf(items []PlanItem, name string) Action {
 func TestPlan_Install(t *testing.T) {
 	items := Plan(
 		[]BundleMeta{m("a", "b1", 1, "c1")},
-		map[string]LockEntry{},
-		map[string]Ownership{},
+		map[Ref]LockEntry{},
+		map[Ref]Ownership{},
 	)
 	if got := actionOf(items, "a"); got != ActionInstall {
 		t.Fatalf("got %v", got)
@@ -32,8 +32,8 @@ func TestPlan_Install(t *testing.T) {
 func TestPlan_Update(t *testing.T) {
 	items := Plan(
 		[]BundleMeta{m("a", "b1", 2, "c2")},
-		map[string]LockEntry{"a": l("b1", 1, "c1")},
-		map[string]Ownership{"a": OwnMine},
+		map[Ref]LockEntry{"skill/a": l("b1", 1, "c1")},
+		map[Ref]Ownership{"skill/a": OwnMine},
 	)
 	if got := actionOf(items, "a"); got != ActionUpdate {
 		t.Fatalf("got %v", got)
@@ -43,8 +43,8 @@ func TestPlan_Update(t *testing.T) {
 func TestPlan_Unchanged(t *testing.T) {
 	items := Plan(
 		[]BundleMeta{m("a", "b1", 1, "c1")},
-		map[string]LockEntry{"a": l("b1", 1, "c1")},
-		map[string]Ownership{"a": OwnMine},
+		map[Ref]LockEntry{"skill/a": l("b1", 1, "c1")},
+		map[Ref]Ownership{"skill/a": OwnMine},
 	)
 	if got := actionOf(items, "a"); got != ActionUnchanged {
 		t.Fatalf("got %v", got)
@@ -54,8 +54,8 @@ func TestPlan_Unchanged(t *testing.T) {
 func TestPlan_Remove(t *testing.T) {
 	items := Plan(
 		nil,
-		map[string]LockEntry{"a": l("b1", 1, "c1")},
-		map[string]Ownership{"a": OwnMine},
+		map[Ref]LockEntry{"skill/a": l("b1", 1, "c1")},
+		map[Ref]Ownership{"skill/a": OwnMine},
 	)
 	if got := actionOf(items, "a"); got != ActionRemove {
 		t.Fatalf("got %v", got)
@@ -67,8 +67,8 @@ func TestPlan_ForeignAlwaysWins(t *testing.T) {
 	t.Run("install 时冲突", func(t *testing.T) {
 		items := Plan(
 			[]BundleMeta{m("a", "b1", 1, "c1")},
-			map[string]LockEntry{},
-			map[string]Ownership{"a": OwnForeign},
+			map[Ref]LockEntry{},
+			map[Ref]Ownership{"skill/a": OwnForeign},
 		)
 		if got := actionOf(items, "a"); got != ActionConflict {
 			t.Fatalf("got %v", got)
@@ -77,8 +77,8 @@ func TestPlan_ForeignAlwaysWins(t *testing.T) {
 	t.Run("update 时冲突", func(t *testing.T) {
 		items := Plan(
 			[]BundleMeta{m("a", "b1", 2, "c2")},
-			map[string]LockEntry{"a": l("b1", 1, "c1")},
-			map[string]Ownership{"a": OwnForeign},
+			map[Ref]LockEntry{"skill/a": l("b1", 1, "c1")},
+			map[Ref]Ownership{"skill/a": OwnForeign},
 		)
 		if got := actionOf(items, "a"); got != ActionConflict {
 			t.Fatalf("got %v", got)
@@ -87,8 +87,8 @@ func TestPlan_ForeignAlwaysWins(t *testing.T) {
 	t.Run("remove 时不碰用户目录", func(t *testing.T) {
 		items := Plan(
 			nil,
-			map[string]LockEntry{"a": l("b1", 1, "c1")},
-			map[string]Ownership{"a": OwnForeign},
+			map[Ref]LockEntry{"skill/a": l("b1", 1, "c1")},
+			map[Ref]Ownership{"skill/a": OwnForeign},
 		)
 		if got := actionOf(items, "a"); got != ActionConflict {
 			t.Fatalf("撤权时若目标已被用户占用，只摘 lock 不删目录，got %v", got)
@@ -100,8 +100,8 @@ func TestPlan_ForeignAlwaysWins(t *testing.T) {
 func TestPlan_LockLostButOwned(t *testing.T) {
 	items := Plan(
 		[]BundleMeta{m("a", "b1", 1, "c1")},
-		map[string]LockEntry{},
-		map[string]Ownership{"a": OwnMine},
+		map[Ref]LockEntry{},
+		map[Ref]Ownership{"skill/a": OwnMine},
 	)
 	if got := actionOf(items, "a"); got != ActionUpdate {
 		t.Fatalf("got %v", got)
@@ -112,8 +112,8 @@ func TestPlan_LockLostButOwned(t *testing.T) {
 func TestPlan_LockPresentButTargetGone(t *testing.T) {
 	items := Plan(
 		[]BundleMeta{m("a", "b1", 1, "c1")},
-		map[string]LockEntry{"a": l("b1", 1, "c1")},
-		map[string]Ownership{"a": OwnAbsent},
+		map[Ref]LockEntry{"skill/a": l("b1", 1, "c1")},
+		map[Ref]Ownership{"skill/a": OwnAbsent},
 	)
 	if got := actionOf(items, "a"); got != ActionInstall {
 		t.Fatalf("got %v", got)
@@ -123,8 +123,8 @@ func TestPlan_LockPresentButTargetGone(t *testing.T) {
 func TestPlan_SortedByName(t *testing.T) {
 	items := Plan(
 		[]BundleMeta{m("c", "b3", 1, "x"), m("a", "b1", 1, "x"), m("b", "b2", 1, "x")},
-		map[string]LockEntry{},
-		map[string]Ownership{},
+		map[Ref]LockEntry{},
+		map[Ref]Ownership{},
 	)
 	want := []string{"a", "b", "c"}
 	for i, w := range want {
@@ -137,12 +137,12 @@ func TestPlan_SortedByName(t *testing.T) {
 func TestSummarize(t *testing.T) {
 	items := Plan(
 		[]BundleMeta{m("a", "b1", 1, "c1"), m("b", "b2", 2, "c2"), m("c", "b3", 1, "c3")},
-		map[string]LockEntry{
-			"b": l("b2", 1, "old"),
-			"c": l("b3", 1, "c3"),
-			"d": l("b4", 1, "c4"),
+		map[Ref]LockEntry{
+			"skill/b": l("b2", 1, "old"),
+			"skill/c": l("b3", 1, "c3"),
+			"skill/d": l("b4", 1, "c4"),
 		},
-		map[string]Ownership{"b": OwnMine, "c": OwnMine, "d": OwnMine},
+		map[Ref]Ownership{"skill/b": OwnMine, "skill/c": OwnMine, "skill/d": OwnMine},
 	)
 	s := Summarize(items)
 	if s.Install != 1 || s.Update != 1 || s.Unchanged != 1 || s.Remove != 1 || s.Conflict != 0 {
@@ -156,8 +156,8 @@ func TestSummarize(t *testing.T) {
 func TestPlan_Rollback_ChecksumSameVersionDiffers(t *testing.T) {
 	items := Plan(
 		[]BundleMeta{m("a", "b1", 15, "c1")}, // v15 是对 v13 的回滚，内容相同
-		map[string]LockEntry{"a": l("b1", 13, "c1")},
-		map[string]Ownership{"a": OwnMine},
+		map[Ref]LockEntry{"skill/a": l("b1", 13, "c1")},
+		map[Ref]Ownership{"skill/a": OwnMine},
 	)
 	if got := actionOf(items, "a"); got != ActionRelabel {
 		t.Fatalf("回滚必须判为 relabel（更新元数据+回执，零文件操作），got %v", got)
@@ -172,8 +172,8 @@ func TestPlan_Rollback_ChecksumSameVersionDiffers(t *testing.T) {
 func TestPlan_TrulyUnchangedNeedsBothMatch(t *testing.T) {
 	items := Plan(
 		[]BundleMeta{m("a", "b1", 13, "c1")},
-		map[string]LockEntry{"a": l("b1", 13, "c1")},
-		map[string]Ownership{"a": OwnMine},
+		map[Ref]LockEntry{"skill/a": l("b1", 13, "c1")},
+		map[Ref]Ownership{"skill/a": OwnMine},
 	)
 	if got := actionOf(items, "a"); got != ActionUnchanged {
 		t.Fatalf("version 与 checksum 都相同才是 unchanged，got %v", got)

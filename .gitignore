@@ -9,6 +9,7 @@
 .env
 .env.local
 /bin/
+/db/
 /dist/
 /tmp/
 coverage.out

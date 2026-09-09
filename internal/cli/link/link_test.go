@@ -47,6 +47,17 @@ func (e env) content(t *testing.T, bundle, sum, body string) string {
 
 func (e env) target(name string) string { return filepath.Join(e.skills, name) }
 
+// sc 组装归属判定所需的 store 侧信息。测试里的内容目录布局是
+// store/<bundle>/<sum>，与生产的 store/<kind>/<bundle>/<sum> 只差一层，
+// 对策略而言没有区别——它只认 BundleDir。
+func (e env) sc(bundle string) StoreCtx {
+	return StoreCtx{
+		Root:      e.storeRoot,
+		BundleDir: filepath.Join(e.storeRoot, bundle),
+		EntryFile: "SKILL.md",
+	}
+}
+
 func write(t *testing.T, p, s string) {
 	t.Helper()
 	if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
@@ -91,7 +102,7 @@ func TestStrategies_InstallUpdateRelease(t *testing.T) {
 			tgt := e.target("corp-a")
 
 			// 安装
-			if err := s.Materialize(v1, tgt, md("corp-a", "aaaaaaaaaaaaaaaa", 1)); err != nil {
+			if err := s.Materialize(v1, tgt, md("corp-a", "aaaaaaaaaaaaaaaa", 1), e.sc("corp-a")); err != nil {
 				t.Fatal(err)
 			}
 			if got := read(t, filepath.Join(tgt, "SKILL.md")); got != "v1" {
@@ -100,13 +111,13 @@ func TestStrategies_InstallUpdateRelease(t *testing.T) {
 			if got := read(t, filepath.Join(tgt, "references", "api.md")); got != "ref-v1" {
 				t.Fatal("支持文件应可读")
 			}
-			info, err := s.Inspect(tgt, e.storeRoot)
+			info, err := s.Inspect(tgt, e.sc("corp-a"))
 			if err != nil || info.Ownership != OwnMine {
 				t.Fatalf("安装后应判定为我方所有: %+v %v", info, err)
 			}
 
 			// 更新
-			if err := s.Materialize(v2, tgt, md("corp-a", "bbbbbbbbbbbbbbbb", 2)); err != nil {
+			if err := s.Materialize(v2, tgt, md("corp-a", "bbbbbbbbbbbbbbbb", 2), e.sc("corp-a")); err != nil {
 				t.Fatal(err)
 			}
 			if got := read(t, filepath.Join(tgt, "SKILL.md")); got != "v2" {
@@ -114,7 +125,7 @@ func TestStrategies_InstallUpdateRelease(t *testing.T) {
 			}
 
 			// 回滚（指回旧内容，零下载）
-			if err := s.Materialize(v1, tgt, md("corp-a", "aaaaaaaaaaaaaaaa", 3)); err != nil {
+			if err := s.Materialize(v1, tgt, md("corp-a", "aaaaaaaaaaaaaaaa", 3), e.sc("corp-a")); err != nil {
 				t.Fatal(err)
 			}
 			if got := read(t, filepath.Join(tgt, "SKILL.md")); got != "v1" {
@@ -122,7 +133,7 @@ func TestStrategies_InstallUpdateRelease(t *testing.T) {
 			}
 
 			// 释放
-			if err := s.Release(tgt); err != nil {
+			if err := s.Release(tgt, e.sc("corp-a")); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := os.Lstat(tgt); !os.IsNotExist(err) {
@@ -156,14 +167,14 @@ func TestStrategies_ForeignDirectoryIsNeverTouched(t *testing.T) {
 			write(t, filepath.Join(tgt, "SKILL.md"), "用户自己写的")
 			write(t, filepath.Join(tgt, "notes.md"), "用户的笔记")
 
-			info, err := s.Inspect(tgt, e.storeRoot)
+			info, err := s.Inspect(tgt, e.sc("corp-a"))
 			if err != nil {
 				t.Fatal(err)
 			}
 			if info.Ownership != OwnForeign {
 				t.Fatalf("无 marker 的真实目录必须判为 foreign，got %v", info.Ownership)
 			}
-			if err := s.Release(tgt); err == nil {
+			if err := s.Release(tgt, e.sc("corp-a")); err == nil {
 				t.Fatal("释放用户自有目录必须被拒绝")
 			}
 			if read(t, filepath.Join(tgt, "SKILL.md")) != "用户自己写的" {
@@ -180,12 +191,12 @@ func TestStrategies_AbsentTarget(t *testing.T) {
 	for _, s := range strategies(newEnv(t)) {
 		t.Run(s.ID(), func(t *testing.T) {
 			e := newEnv(t)
-			info, err := s.Inspect(e.target("nope"), e.storeRoot)
+			info, err := s.Inspect(e.target("nope"), e.sc("nope"))
 			if err != nil || info.Ownership != OwnAbsent {
 				t.Fatalf("不存在的目标应为 absent: %+v %v", info, err)
 			}
 			// 释放不存在的目标应当是无操作，不报错
-			if err := s.Release(e.target("nope")); err != nil {
+			if err := s.Release(e.target("nope"), e.sc("nope")); err != nil {
 				t.Fatalf("释放不存在的目标不应报错: %v", err)
 			}
 		})
@@ -205,7 +216,7 @@ func TestSymlink_ForeignLinkOutsideStore(t *testing.T) {
 	if err := os.Symlink(outside, tgt); err != nil {
 		t.Fatal(err)
 	}
-	info, err := Symlink{}.Inspect(tgt, e.storeRoot)
+	info, err := Symlink{}.Inspect(tgt, e.sc("corp-a"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,10 +229,10 @@ func TestSymlink_InspectReturnsStoreDir(t *testing.T) {
 	e := newEnv(t)
 	v1 := e.content(t, "corp-a", "aaaaaaaaaaaaaaaa", "v1")
 	tgt := e.target("corp-a")
-	if err := (Symlink{}).Materialize(v1, tgt, md("corp-a", "aaaaaaaaaaaaaaaa", 1)); err != nil {
+	if err := (Symlink{}).Materialize(v1, tgt, md("corp-a", "aaaaaaaaaaaaaaaa", 1), e.sc("corp-a")); err != nil {
 		t.Fatal(err)
 	}
-	info, _ := Symlink{}.Inspect(tgt, e.storeRoot)
+	info, _ := Symlink{}.Inspect(tgt, e.sc("corp-a"))
 	if info.StoreDir != v1 {
 		t.Fatalf("应能反推 store 目录用于 lock 重建\n got: %s\nwant: %s", info.StoreDir, v1)
 	}
@@ -231,7 +242,7 @@ func TestSymlink_InspectReturnsStoreDir(t *testing.T) {
 func TestSymlink_NoTempEntryInSkills(t *testing.T) {
 	e := newEnv(t)
 	v1 := e.content(t, "corp-a", "aaaaaaaaaaaaaaaa", "v1")
-	if err := (Symlink{}).Materialize(v1, e.target("corp-a"), md("corp-a", "aaaaaaaaaaaaaaaa", 1)); err != nil {
+	if err := (Symlink{}).Materialize(v1, e.target("corp-a"), md("corp-a", "aaaaaaaaaaaaaaaa", 1), e.sc("corp-a")); err != nil {
 		t.Fatal(err)
 	}
 	entries, _ := os.ReadDir(e.skills)
@@ -251,10 +262,10 @@ func TestCopy_MarkerIdentifiesOwnership(t *testing.T) {
 	c := Copy{Staging: e.staging, Trash: e.trash}
 	v1 := e.content(t, "corp-a", "aaaaaaaaaaaaaaaa", "v1")
 	tgt := e.target("corp-a")
-	if err := c.Materialize(v1, tgt, md("corp-a", "aaaaaaaaaaaaaaaa", 7)); err != nil {
+	if err := c.Materialize(v1, tgt, md("corp-a", "aaaaaaaaaaaaaaaa", 7), e.sc("corp-a")); err != nil {
 		t.Fatal(err)
 	}
-	info, err := c.Inspect(tgt, e.storeRoot)
+	info, err := c.Inspect(tgt, e.sc("corp-a"))
 	if err != nil || info.Ownership != OwnMine || info.Marker == nil {
 		t.Fatalf("copy 策略靠 marker 判定归属: %+v %v", info, err)
 	}
@@ -269,10 +280,10 @@ func TestCopy_LeavesNoResidue(t *testing.T) {
 	v1 := e.content(t, "corp-a", "aaaaaaaaaaaaaaaa", "v1")
 	v2 := e.content(t, "corp-a", "bbbbbbbbbbbbbbbb", "v2")
 	tgt := e.target("corp-a")
-	if err := c.Materialize(v1, tgt, md("corp-a", "aaaaaaaaaaaaaaaa", 1)); err != nil {
+	if err := c.Materialize(v1, tgt, md("corp-a", "aaaaaaaaaaaaaaaa", 1), e.sc("corp-a")); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Materialize(v2, tgt, md("corp-a", "bbbbbbbbbbbbbbbb", 2)); err != nil {
+	if err := c.Materialize(v2, tgt, md("corp-a", "bbbbbbbbbbbbbbbb", 2), e.sc("corp-a")); err != nil {
 		t.Fatal(err)
 	}
 	for _, d := range []string{e.staging, e.trash} {

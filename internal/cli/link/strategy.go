@@ -39,8 +39,11 @@ const Marker = core.MarkerFile
 
 // MarkerData 是 marker 文件的内容。
 type MarkerData struct {
-	BundleID       string `json:"bundle_id"`
-	BundleName     string `json:"bundle_name"`
+	BundleID   string `json:"bundle_id"`
+	BundleName string `json:"bundle_name"`
+	// Kind 必须记：skill 与 command 落盘完全相同（都是 skills/<name>/），
+	// 重建时无法从文件系统区分，只能靠这里记下的原始类型。
+	Kind           string `json:"kind,omitempty"`
 	Version        int    `json:"version"`
 	Checksum       string `json:"checksum"`
 	MaterializedAt string `json:"materialized_at"`
@@ -73,11 +76,28 @@ type Info struct {
 type Strategy interface {
 	ID() string
 	// Materialize 让 target 指向 storeDir。target 已存在且属于我方时替换。
-	Materialize(storeDir, target string, md MarkerData) error
-	// Inspect 判定 target 的归属。storeRoot 用于确认链接确实指向我们的 store。
-	Inspect(target, storeRoot string) (Info, error)
+	Materialize(storeDir, target string, md MarkerData, sc StoreCtx) error
+	// Inspect 判定 target 的归属。sc 给出 store 的位置与本 bundle 的入口
+	// 文件名——文件形态靠逐版本内容比对判归属，没有入口文件名就比不了。
+	Inspect(target string, sc StoreCtx) (Info, error)
 	// Release 释放入口。只在 Inspect 判定为 OwnMine 时可调用。
-	Release(target string) error
+	Release(target string, sc StoreCtx) error
+}
+
+// StoreCtx 是判定归属所需的 store 侧信息。
+//
+// 它取代了原来的 storeRoot 单参数：store 布局改成
+// store/<kind>/<name>/<checksum> 之后，「这个 bundle 的内容在哪」
+// 无法再从 target 路径反推——同名不同 kind 的两个 bundle，target
+// 长得完全不一样，但从前的代码只看得到一个名字。
+type StoreCtx struct {
+	// Root 是 store 根目录（~/.ith5/store），用于判断链接是否指向我方。
+	Root string
+	// BundleDir 是本 bundle 的目录（<root>/<kind>/<name>），
+	// 文件形态在它下面逐版本比对内容。
+	BundleDir string
+	// EntryFile 是 store 版本目录里的入口文件名（AGENT.md / HOOK.js / ...）。
+	EntryFile string
 }
 
 // ErrForeign 表示目标被用户自有内容占用，必须跳过。
@@ -120,7 +140,7 @@ func underRoot(p, root string) bool {
 //
 // Node 与 Go 在两个平台上都把 junction 报告为符号链接，因此这段代码
 // 三平台一致。
-func inspectPointer(target, storeRoot string) (Info, error) {
+func inspectPointer(target string, sc StoreCtx) (Info, error) {
 	fi, err := os.Lstat(target)
 	if os.IsNotExist(err) {
 		return Info{Ownership: OwnAbsent}, nil
@@ -137,7 +157,7 @@ func inspectPointer(target, storeRoot string) (Info, error) {
 		if !filepath.IsAbs(dest) {
 			dest = filepath.Join(filepath.Dir(target), dest)
 		}
-		if underRoot(dest, storeRoot) {
+		if underRoot(dest, sc.Root) {
 			return Info{Ownership: OwnMine, StoreDir: dest}, nil
 		}
 		// 指向 store 之外的链接是用户自己建的，不碰

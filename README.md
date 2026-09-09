@@ -8,7 +8,7 @@
 skill / command / agent 的内容、版本和权限，并记录「谁拿到了什么内容、在哪个仓库调用了什么工具」——
 审计的是**工具调用**，不涉及和 AI 的对话内容。
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](./LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8.svg)](./go.mod)
 [![Hook p95](https://img.shields.io/badge/hook%20p95-2.8ms-brightgreen.svg)](#开发)
 [![Dependencies](https://img.shields.io/badge/外部依赖-仅%20PostgreSQL-informational.svg)](#架构)
@@ -277,4 +277,7 @@ db/migrations/        SQL 迁移（goose 格式，embed 进服务端二进制）
 
 ## License
 
-[MIT](./LICENSE)
+[AGPL-3.0](./LICENSE) · Copyright (c) 2026 ITH5 Contributors
+
+自用、自建、修改、二次开发都没有限制。唯一的要求是：如果你修改了 ITH5 并把它作为
+网络服务提供给别人,需要把你的改动一并开源。想在闭源产品里使用,请联系作者获取商业授权。

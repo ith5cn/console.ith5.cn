@@ -5,9 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
-
-	"github.com/ith5/ith5/internal/core"
 )
 
 // FileCopy 是**文件形态**的物化策略（技术方案 §8.5.3b）。
@@ -22,19 +19,19 @@ import (
 type FileCopy struct {
 	// Staging 必须与目标同卷（<claude_home> 之下）且在 agents/ 之外。
 	Staging string
-	// StoreRoot 是 ~/.ith5/store。Release 需要它才能判断该文件是不是我们的——
-	// 接口的 Release 不带 storeRoot，而「删之前必须确认归属」不能妥协。
+	// StoreRoot 是 ~/.ith5/store。保留它是为了构造上的对称，
+	// 归属判定所需的信息现在由调用方通过 StoreCtx 传入。
 	StoreRoot string
 }
 
 func (FileCopy) ID() string { return "copy-file" }
 
-// Materialize 把 store 里的 AGENT.md 复制成 agents/<name>.md。
-func (c FileCopy) Materialize(storeDir, target string, _ MarkerData) error {
+// Materialize 把 store 里的入口文件复制成 <root>/<name><ext>。
+func (c FileCopy) Materialize(storeDir, target string, _ MarkerData, sc StoreCtx) error {
 	if c.Staging == "" {
 		return fmt.Errorf("copy-file 策略需要配置 Staging 路径")
 	}
-	src := filepath.Join(storeDir, core.AgentFile)
+	src := filepath.Join(storeDir, sc.EntryFile)
 	stage := filepath.Join(c.Staging, filepath.Base(target))
 
 	if err := os.MkdirAll(c.Staging, 0o755); err != nil {
@@ -61,7 +58,7 @@ func (c FileCopy) Materialize(storeDir, target string, _ MarkerData) error {
 //
 // 候选集是有界的：按 D11 每个 bundle 最多保留 3 个版本目录，
 // 每个里面只有一个几 KB 的文件。
-func (c FileCopy) Inspect(target, storeRoot string) (Info, error) {
+func (c FileCopy) Inspect(target string, sc StoreCtx) (Info, error) {
 	fi, err := os.Lstat(target)
 	if os.IsNotExist(err) {
 		return Info{Ownership: OwnAbsent}, nil
@@ -78,8 +75,8 @@ func (c FileCopy) Inspect(target, storeRoot string) (Info, error) {
 		if !filepath.IsAbs(dest) {
 			dest = filepath.Join(filepath.Dir(target), dest)
 		}
-		if underRoot(dest, storeRoot) {
-			// 链接指向的是版本目录里的 AGENT.md，store 目录是它的父级
+		if underRoot(dest, sc.Root) {
+			// 链接指向的是版本目录里的入口文件，store 目录是它的父级
 			return Info{Ownership: OwnMine, StoreDir: filepath.Dir(dest)}, nil
 		}
 		return Info{Ownership: OwnForeign, Reason: ReasonNameTaken}, nil
@@ -89,15 +86,14 @@ func (c FileCopy) Inspect(target, storeRoot string) (Info, error) {
 		return Info{Ownership: OwnForeign, Reason: ReasonNameTaken}, nil
 	}
 
-	name := bundleNameFromTarget(target)
 	have, err := os.ReadFile(target)
 	if err != nil {
 		return Info{}, err
 	}
-	bundleDir := filepath.Join(storeRoot, name)
+	bundleDir := sc.BundleDir
 	entries, err := os.ReadDir(bundleDir)
 	if os.IsNotExist(err) {
-		// 我们从没为这个名字下过内容 —— 这是用户自己的 agent
+		// 我们从没为这个 bundle 下过内容 —— 这是用户自己的文件
 		return Info{Ownership: OwnForeign, Reason: ReasonNameTaken}, nil
 	}
 	if err != nil {
@@ -107,7 +103,7 @@ func (c FileCopy) Inspect(target, storeRoot string) (Info, error) {
 		if !e.IsDir() {
 			continue
 		}
-		want, err := os.ReadFile(filepath.Join(bundleDir, e.Name(), core.AgentFile))
+		want, err := os.ReadFile(filepath.Join(bundleDir, e.Name(), sc.EntryFile))
 		if err != nil {
 			continue
 		}
@@ -130,11 +126,11 @@ func (c FileCopy) Inspect(target, storeRoot string) (Info, error) {
 // 只有 Inspect 判定为我方所有才真删——用户自建的、以及被用户改过的，
 // 一律留着。这与 PRD「切断续期，不保证擦除」的立场一致：
 // 撤权停止的是后续更新，不是强制清除他手上的东西。
-func (c FileCopy) Release(target string) error {
+func (c FileCopy) Release(target string, sc StoreCtx) error {
 	if _, err := os.Lstat(target); os.IsNotExist(err) {
 		return nil
 	}
-	info, err := c.Inspect(target, c.StoreRoot)
+	info, err := c.Inspect(target, sc)
 	if err != nil {
 		return err
 	}
@@ -142,11 +138,6 @@ func (c FileCopy) Release(target string) error {
 		return fmt.Errorf("拒绝删除非我方所有的文件 %s（%s）", target, info.Reason)
 	}
 	return os.Remove(target)
-}
-
-// bundleNameFromTarget 由 agents/<name>.md 反推 bundle 名。
-func bundleNameFromTarget(target string) string {
-	return strings.TrimSuffix(filepath.Base(target), ".md")
 }
 
 func copyFile(src, dst string) error {

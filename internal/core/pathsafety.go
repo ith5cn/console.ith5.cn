@@ -14,7 +14,9 @@ var (
 	ErrNameReserved  = errors.New("bundle 名被 Claude Code 保留")
 	ErrNameTooLong   = errors.New("bundle 名过长")
 	ErrNoSkillMD     = errors.New("bundle 必须包含 SKILL.md")
-	ErrNoAgentMD     = errors.New("agent 必须且只能包含一个文件，名为 AGENT.md")
+	ErrNoAgentMD     = errors.New("该类型必须且只能包含一个文件")
+	ErrNotJSONObject = errors.New("内容必须是一个 JSON 对象")
+	ErrNoMCPServers  = errors.New("MCP 配置必须含顶层 mcpServers 对象，且至少一个 server")
 	ErrBadKind       = errors.New("未知的 bundle 类型")
 	ErrPathAbsolute  = errors.New("文件路径必须是相对路径")
 	ErrPathTraversal = errors.New("文件路径不得包含 ..")
@@ -31,11 +33,18 @@ const maxNameLen = 64
 // SkillFile 是目录形态 Bundle 必须包含的入口文件名。
 const SkillFile = "SKILL.md"
 
-// AgentFile 是文件形态 Bundle 的唯一文件名（技术方案 §8.2.1b）。
+// 文件形态与合并形态 Bundle 的唯一文件名（技术方案 §8.2.1b）。
 //
-// 它在 store 里叫 AGENT.md，物化到用户机器上时改名为 <bundle>.md ——
-// store 侧用固定名，是为了让内容寻址与去重不受 bundle 名影响。
-const AgentFile = "AGENT.md"
+// 它们在 store 里用固定名，物化到用户机器上时才改成 <bundle><ext> ——
+// 固定名是为了让内容寻址与去重不受 bundle 名影响。
+const (
+	AgentFile    = "AGENT.md"
+	HookFile     = "HOOK.js"
+	WorkflowFile = "WORKFLOW.js"
+	StandardFile = "STANDARD.md"
+	SettingFile  = "SETTING.json"
+	MCPFile      = "MCP.json"
+)
 
 // MarkerFile 是 copy 策略下标记目录归属的文件（技术方案 §8.8）。
 // 它由 CLI 写入，Bundle 内容中不允许出现同名文件。
@@ -75,7 +84,8 @@ func ValidateName(name string) error {
 //
 // 校验按**形态**分流（§5.5）：
 //   - 目录形态：至少包含 SKILL.md，其余文件不限
-//   - 文件形态：必须且只能包含一个 AGENT.md
+//   - 文件形态：必须且只能包含一个入口文件（AGENT.md / HOOK.js / ...）
+//   - 合并形态：同上，入口文件是一份 JSON 片段
 //
 // kind 是必需参数而非可选：这是「错了会出安全问题」的逻辑，
 // 不能让调用方通过省略参数拿到一个宽松的默认行为。
@@ -98,12 +108,14 @@ func ValidateFiles(kind Kind, files []File) error {
 		seen[f.Path] = true
 	}
 
-	if kind.Shape() == ShapeFile {
+	if shape := kind.Shape(); shape == ShapeFile || shape == ShapeMerge {
 		// 「只能一个文件」不是洁癖：多出来的文件在物化时无处安放
-		// ——文件形态的目标是一个 .md，没有目录可以承载支持文件。
+		// ——文件形态的目标是一个文件，没有目录可以承载支持文件；
+		// 合并形态干脆没有目标目录。
 		// 允许它们进 store 只会造成「发布成功、内容却下不去」。
-		if len(files) != 1 || !seen[AgentFile] {
-			return ErrNoAgentMD
+		entry := kind.EntryFile()
+		if len(files) != 1 || !seen[entry] {
+			return fmt.Errorf("%w，名为 %s", ErrNoAgentMD, entry)
 		}
 		return nil
 	}

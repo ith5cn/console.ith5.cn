@@ -39,8 +39,17 @@ type Syncer struct {
 	Paths      Paths
 	Store      *Store
 	Strategies Strategies
+	Merger     *Merger
 	Client     *Client
 	Server     string
+}
+
+// merger 惰性构造，测试与旧调用方可以不显式提供。
+func (s *Syncer) merger() *Merger {
+	if s.Merger == nil {
+		s.Merger = &Merger{Paths: s.Paths, Store: s.Store}
+	}
+	return s.Merger
 }
 
 // Run 执行同步（技术方案 §8.4）。
@@ -82,35 +91,33 @@ func (s *Syncer) Run(ctx context.Context) (SyncResult, error) {
 	_ = etag
 	res.NotModifi = !changed
 
-	// 重建出来的条目只有 checksum，没有版本号——用 manifest 对照补齐
+	// 重建出来的条目只有 checksum，没有版本号——用 manifest 对照补齐；
+	// 同时纠正 skill/command 这类无法从文件系统区分的 kind 判错。
+	reconcileRefs(lock, manifest)
 	reconcileVersions(lock, manifest)
 
 	metas := make([]core.BundleMeta, 0, len(manifest.Bundles))
-	names := make([]string, 0, len(manifest.Bundles))
-	shapes := make(map[string]core.Shape, len(manifest.Bundles))
+	refs := make([]core.Ref, 0, len(manifest.Bundles)+len(lock.Bundles))
+	seen := make(map[core.Ref]bool, len(manifest.Bundles))
 	for _, b := range manifest.Bundles {
 		kind := core.Kind(b.Kind)
 		metas = append(metas, core.BundleMeta{
 			ID: b.ID, Name: b.Name, Kind: kind,
 			Version: b.Version, Checksum: b.Checksum, Description: b.Description,
 		})
-		names = append(names, b.Name)
-		shapes[b.Name] = kind.Shape()
+		ref := core.MakeRef(kind, b.Name)
+		refs = append(refs, ref)
+		seen[ref] = true
 	}
-	for n, e := range lock.Bundles {
-		names = append(names, n)
-		// manifest 里没有的（撤权待删）只能按 lock 记的形态探测。
-		// 这正是 LockEntry.Shape 必须显式记录的原因：这里没有 manifest 可查。
-		if _, ok := shapes[n]; !ok {
-			shape := e.Shape
-			if shape == "" {
-				shape = e.Kind.Shape()
-			}
-			shapes[n] = shape
+	// manifest 里没有的（撤权待删）也要探测：它的 kind 由 ref 自带，
+	// 不必再从 lock 反推形态。
+	for ref := range lock.Bundles {
+		if !seen[ref] {
+			refs = append(refs, ref)
 		}
 	}
 
-	own, err := Ownerships(s.Paths, s.Strategies, names, shapes)
+	own, err := Ownerships(s.Paths, s.Strategies, s.merger(), refs, lock)
 	if err != nil {
 		return res, err
 	}
@@ -130,32 +137,41 @@ func (s *Syncer) Run(ctx context.Context) (SyncResult, error) {
 			continue
 
 		case core.ActionConflict:
-			target := s.Paths.Target(item.Shape, item.Name)
+			target := s.Paths.Target(item.Kind, item.Name)
 			reason := link.ReasonNameTaken
-			if info, err := s.Strategies.For(item.Shape).Inspect(target, s.Paths.Store); err == nil && info.Reason != "" {
+			if item.Shape == core.ShapeMerge {
+				// 合并形态只有一种受阻成因：用户改过我方写入的键。
+				reason = link.ReasonLocallyModified
+			} else if info, err := s.Strategies.For(item.Shape).Inspect(
+				target, s.Paths.StoreCtx(item.Kind, item.Name)); err == nil && info.Reason != "" {
 				reason = info.Reason
 			}
 			res.Conflicts = append(res.Conflicts, Conflict{Name: item.Name, Target: target, Reason: reason})
 			receipts = append(receipts, receipt(item, "conflict_skipped", map[string]any{
-				"target":          s.Paths.RelTarget(item.Shape, item.Name),
+				"target":          s.Paths.RelTarget(item.Kind, item.Name),
 				"conflict_reason": reason,
 			}))
 			// 冲突时把它从 lock 里摘掉：我们并不管理这个入口
-			delete(lock.Bundles, item.Name)
+			delete(lock.Bundles, item.Ref)
 
 		case core.ActionRemove:
-			if err := s.Strategies.For(item.Shape).Release(s.Paths.Target(item.Shape, item.Name)); err != nil {
+			if item.Shape == core.ShapeMerge {
+				if err := s.merger().Release(item.Kind, lock.Bundles[item.Ref]); err != nil {
+					return res, fmt.Errorf("撤销 %s 的配置合并: %w", item.Name, err)
+				}
+			} else if err := s.Strategies.For(item.Shape).Release(
+				s.Paths.Target(item.Kind, item.Name), s.Paths.StoreCtx(item.Kind, item.Name)); err != nil {
 				return res, fmt.Errorf("释放 %s: %w", item.Name, err)
 			}
-			delete(lock.Bundles, item.Name)
+			delete(lock.Bundles, item.Ref)
 			receipts = append(receipts, receipt(item, "remove", nil))
 
 		case core.ActionRelabel:
 			// 内容未变，只有版本号变了（回滚）。零文件操作。
-			e := lock.Bundles[item.Name]
+			e := lock.Bundles[item.Ref]
 			e.Version = item.Version
 			e.BundleID = item.BundleID
-			lock.Bundles[item.Name] = e
+			lock.Bundles[item.Ref] = e
 			receipts = append(receipts, receipt(item, "update", map[string]any{"relabel": true}))
 
 		case core.ActionInstall, core.ActionUpdate:
@@ -190,7 +206,7 @@ func (s *Syncer) Run(ctx context.Context) (SyncResult, error) {
 // materialize 下载（若需要）并切换指针。
 func (s *Syncer) materialize(ctx context.Context, item core.PlanItem, mb api.ManifestBundle, lock *Lock) error {
 	// 内容已在 store 里就不下载——回滚与重发相同内容时命中这里
-	if !s.Store.Has(item.Shape, item.Name, item.Checksum) {
+	if !s.Store.Has(item.Kind, item.Name, item.Checksum) {
 		body, err := s.Client.BundleVersion(ctx, item.BundleID, item.Version)
 		if err != nil {
 			return fmt.Errorf("下载 %s: %w", item.Name, err)
@@ -204,23 +220,67 @@ func (s *Syncer) materialize(ctx context.Context, item core.PlanItem, mb api.Man
 		}
 	}
 
-	strategy := s.Strategies.For(item.Shape)
-	dir := s.Store.Dir(item.Name, item.Checksum)
-	target := s.Paths.Target(item.Shape, item.Name)
-	md := link.MarkerData{
-		BundleID: item.BundleID, BundleName: item.Name,
-		Version: item.Version, Checksum: item.Checksum, Strategy: strategy.ID(),
-	}
-	if err := strategy.Materialize(dir, target, md); err != nil {
-		return fmt.Errorf("切换 %s 的入口: %w", item.Name, err)
+	dir := s.Store.Dir(item.Kind, item.Name, item.Checksum)
+	target := s.Paths.Target(item.Kind, item.Name)
+
+	entry := core.LockEntry{
+		BundleID: item.BundleID, Name: item.Name, Kind: item.Kind, Shape: item.Shape,
+		Version: item.Version, Checksum: item.Checksum, Target: target, Store: dir,
 	}
 
-	lock.Bundles[item.Name] = core.LockEntry{
-		BundleID: item.BundleID, Kind: item.Kind, Shape: item.Shape, Version: item.Version,
-		Checksum: item.Checksum, Target: target, Store: dir,
+	if item.Shape == core.ShapeMerge {
+		keys, err := s.merger().Apply(item.Kind, dir, lock.Bundles[item.Ref])
+		if err != nil {
+			return fmt.Errorf("合并 %s 到 %s: %w", item.Name, target, err)
+		}
+		entry.MergeKeys = keys
+	} else {
+		strategy := s.Strategies.For(item.Shape)
+		md := link.MarkerData{
+			BundleID: item.BundleID, BundleName: item.Name, Kind: string(item.Kind),
+			Version: item.Version, Checksum: item.Checksum, Strategy: strategy.ID(),
+		}
+		if err := strategy.Materialize(dir, target, md, s.Paths.StoreCtx(item.Kind, item.Name)); err != nil {
+			return fmt.Errorf("切换 %s 的入口: %w", item.Name, err)
+		}
 	}
-	_ = s.Store.Prune(item.Name, []string{item.Checksum}, StoreKeep)
+
+	lock.Bundles[item.Ref] = entry
+	_ = s.Store.Prune(item.Kind, item.Name, []string{item.Checksum}, StoreKeep)
 	return nil
+}
+
+// reconcileRefs 把 kind 判错的 lock 条目重新挂到正确的 ref 上。
+//
+// skill 与 command 在 claude_home 里长得一模一样，用 copy 策略且 marker
+// 没记 kind（老版本写的）时，重建只能按 skill 兜底。若服务端发的其实是
+// command，lock 里就会出现一条 skill/<name>，而 manifest 里是 command/<name>。
+//
+// 不纠正的后果不是「多装一份」，而是**内容被删掉**：Plan 会把
+// command/<name> 判成 install、把 skill/<name> 判成 remove，两者指向同一个
+// 入口，而 remove 排在后面执行。
+func reconcileRefs(lock *Lock, m api.ManifestResp) {
+	for _, b := range m.Bundles {
+		kind := core.Kind(b.Kind)
+		want := core.MakeRef(kind, b.Name)
+		if _, ok := lock.Bundles[want]; ok {
+			continue
+		}
+		for ref, e := range lock.Bundles {
+			if ref == want || e.Name != b.Name {
+				continue
+			}
+			// 只在两者落盘位置相同时改挂——不同根目录的同名内容是
+			// 两个独立入口，各自都对，不能合并。
+			if ref.Kind().Root() != kind.Root() {
+				continue
+			}
+			e.Kind = kind
+			delete(lock.Bundles, ref)
+			lock.Bundles[want] = e
+			break
+		}
+	}
 }
 
 // reconcileVersions 用 manifest 补齐重建 lock 时拿不到的版本号。
@@ -229,18 +289,20 @@ func (s *Syncer) materialize(ctx context.Context, item core.PlanItem, mb api.Man
 // 因此重建只能拿到摘要，版本号必须由 manifest 对照（技术方案 §8.8）。
 func reconcileVersions(lock *Lock, m api.ManifestResp) {
 	for _, b := range m.Bundles {
-		e, ok := lock.Bundles[b.Name]
+		ref := core.MakeRef(core.Kind(b.Kind), b.Name)
+		e, ok := lock.Bundles[ref]
 		if !ok || e.Version != 0 || e.ShortSum == "" {
 			continue
 		}
 		if core.ShortSum(b.Checksum) == e.ShortSum {
 			e.BundleID = b.ID
+			e.Name = b.Name
 			e.Kind = core.Kind(b.Kind)
 			e.Shape = core.Kind(b.Kind).Shape()
 			e.Version = b.Version
 			e.Checksum = b.Checksum
 			e.ShortSum = ""
-			lock.Bundles[b.Name] = e
+			lock.Bundles[ref] = e
 		}
 	}
 }

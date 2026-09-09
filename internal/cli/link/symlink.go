@@ -15,7 +15,7 @@ type Symlink struct{}
 
 func (Symlink) ID() string { return "symlink" }
 
-func (s Symlink) Materialize(storeDir, target string, _ MarkerData) error {
+func (s Symlink) Materialize(storeDir, target string, _ MarkerData, _ StoreCtx) error {
 	abs, err := filepath.Abs(storeDir)
 	if err != nil {
 		return err
@@ -38,12 +38,12 @@ func (s Symlink) Materialize(storeDir, target string, _ MarkerData) error {
 	return nil
 }
 
-func (Symlink) Inspect(target, storeRoot string) (Info, error) {
-	return inspectPointer(target, storeRoot)
+func (Symlink) Inspect(target string, sc StoreCtx) (Info, error) {
+	return inspectPointer(target, sc)
 }
 
 // Release 删除链接本身，绝不跟随链接删除目标。
-func (Symlink) Release(target string) error {
+func (Symlink) Release(target string, _ StoreCtx) error {
 	fi, err := os.Lstat(target)
 	if os.IsNotExist(err) {
 		return nil

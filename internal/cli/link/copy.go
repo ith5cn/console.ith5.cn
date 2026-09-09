@@ -26,7 +26,7 @@ type Copy struct {
 
 func (Copy) ID() string { return "copy" }
 
-func (c Copy) Materialize(storeDir, target string, md MarkerData) error {
+func (c Copy) Materialize(storeDir, target string, md MarkerData, _ StoreCtx) error {
 	if c.Staging == "" || c.Trash == "" {
 		return fmt.Errorf("copy 策略需要配置 Staging 与 Trash 路径")
 	}
@@ -70,13 +70,13 @@ func (c Copy) Materialize(storeDir, target string, md MarkerData) error {
 	return nil
 }
 
-func (Copy) Inspect(target, storeRoot string) (Info, error) {
-	return inspectPointer(target, storeRoot)
+func (Copy) Inspect(target string, sc StoreCtx) (Info, error) {
+	return inspectPointer(target, sc)
 }
 
 // Release 把目录挪进 trash 后删除。
 // 只有带我方 marker 的目录才允许释放——这是不碰用户文件的最后一道闸。
-func (c Copy) Release(target string) error {
+func (c Copy) Release(target string, _ StoreCtx) error {
 	fi, err := os.Lstat(target)
 	if os.IsNotExist(err) {
 		return nil

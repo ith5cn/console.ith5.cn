@@ -310,10 +310,9 @@ func handleRevoked(s *session) error {
 	lock, _, err := cli.LoadLock(s.paths.LockFile())
 	if err == nil {
 		st := cli.NewStrategies(s.cfg.LinkStrategy, s.paths)
-		for name, e := range lock.Bundles {
-			shape := lockShape(e)
-			if err := st.For(shape).Release(s.paths.Target(shape, name)); err == nil {
-				fmt.Printf("  已移除 %s\n", name)
+		for ref, e := range lock.Bundles {
+			if err := cli.ReleaseEntry(s.paths, st, ref, e); err == nil {
+				fmt.Printf("  已移除 %s\n", ref)
 			}
 		}
 	}
@@ -361,15 +360,16 @@ func cmdStatus() error {
 		fmt.Print("（已过期）")
 	}
 	fmt.Printf("\n\n已安装 %d 项:\n", len(lock.Bundles))
-	names := make([]string, 0, len(lock.Bundles))
-	for n := range lock.Bundles {
-		names = append(names, n)
+	refs := make([]string, 0, len(lock.Bundles))
+	for r := range lock.Bundles {
+		refs = append(refs, string(r))
 	}
-	sort.Strings(names)
-	for _, n := range names {
-		e := lock.Bundles[n]
-		fmt.Printf("  %-24s v%-4d %-8s %s\n", n, e.Version, string(e.Kind),
-			s.paths.RelTarget(lockShape(e), n))
+	sort.Strings(refs)
+	for _, r := range refs {
+		ref := core.Ref(r)
+		e := lock.Bundles[ref]
+		fmt.Printf("  %-32s v%-4d %-9s %s\n", r, e.Version, string(e.Kind),
+			s.paths.RelTarget(ref.Kind(), ref.Name()))
 	}
 	return nil
 }
@@ -457,11 +457,16 @@ func cmdDoctor() error {
 	// 悬空指针：用户误删 store 会让所有入口失效，且 Claude Code 静默读不到
 	lock, _, _ := cli.LoadLock(s.paths.LockFile())
 	dangling := 0
-	for name, e := range lock.Bundles {
+	for ref, e := range lock.Bundles {
+		// 合并形态没有独立入口可 stat —— 它的「悬空」等价于用户把我方
+		// 写入的键删了，那由 sync 的归属判定处理，不是这里的悬空指针。
+		if e.Shape == core.ShapeMerge || ref.Kind().Shape() == core.ShapeMerge {
+			continue
+		}
 		// os.Stat 跟随链接：悬空的软链在这里会报错，正是我们要找的。
 		// agent 的悬空比 skill 更隐蔽——skill 悬空时用户敲 /name 立刻发现，
 		// agent 悬空只有在派发那一刻才失败，而那发生在长任务中途。
-		if _, err := os.Stat(s.paths.Target(lockShape(e), name)); err != nil {
+		if _, err := os.Stat(s.paths.Target(ref.Kind(), ref.Name())); err != nil {
 			dangling++
 		}
 	}
@@ -483,13 +488,12 @@ func cmdLogout(args []string) error {
 		lock, _, err := cli.LoadLock(s.paths.LockFile())
 		if err == nil {
 			st := cli.NewStrategies(s.cfg.LinkStrategy, s.paths)
-			for name, e := range lock.Bundles {
-				shape := lockShape(e)
-				if err := st.For(shape).Release(s.paths.Target(shape, name)); err != nil {
-					fmt.Printf("  跳过 %s: %v\n", name, err)
+			for ref, e := range lock.Bundles {
+				if err := cli.ReleaseEntry(s.paths, st, ref, e); err != nil {
+					fmt.Printf("  跳过 %s: %v\n", ref, err)
 					continue
 				}
-				fmt.Printf("  已移除 %s\n", name)
+				fmt.Printf("  已移除 %s\n", ref)
 			}
 		}
 		os.Remove(s.paths.LockFile())
@@ -533,16 +537,4 @@ func openBrowser(url string) error {
 	default:
 		return exec.Command("xdg-open", url).Start()
 	}
-}
-
-// lockShape 取 lock 条目记录的落盘形态。
-//
-// 旧版 lock 没有这个字段，回退到按 kind 推。正常情况下不会走到——
-// lockVersion 变更会让旧 lock 直接重建——但 Release 是删文件的路径，
-// 在这里多一个兜底比在这里相信「不会发生」划算。
-func lockShape(e core.LockEntry) core.Shape {
-	if e.Shape != "" {
-		return e.Shape
-	}
-	return e.Kind.Shape()
 }
