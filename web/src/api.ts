@@ -88,7 +88,9 @@ export class ApiError extends Error {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const method = (init?.method ?? 'GET').toUpperCase()
-  if (getUser()?.role === 'viewer' && !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+  // viewer 只限制管理面写操作。设备激活、令牌刷新和 CLI 流程属于体验
+  // 本身，不能因为浏览器里还留着 viewer 登录态就被误拦截。
+  if (path.startsWith('/admin/') && getUser()?.role === 'viewer' && !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
     throw new ApiError(403, 'demo_read_only', DEMO_READ_ONLY_MESSAGE)
   }
   const token = getToken()

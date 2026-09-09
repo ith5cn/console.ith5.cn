@@ -68,13 +68,28 @@ describe('AppShell', () => {
 })
 
 describe('Demo viewer API', () => {
-  it('blocks mutations before sending a network request', async () => {
+  function setViewer() {
     localStorage.setItem('ith5_token', 'demo-token')
     localStorage.setItem('ith5_user', JSON.stringify({ id: 'u', email: 'demo@example.com', role: 'viewer', org_id: 'o' }))
+  }
+
+  it('blocks admin mutations before sending a network request', async () => {
+    setViewer()
     const fetchMock = vi.spyOn(globalThis, 'fetch')
 
     await expect(api.createGroup('demo', 'Demo', '')).rejects.toThrow(DEMO_READ_ONLY_MESSAGE)
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('allows device activation while a viewer session exists', async () => {
+    setViewer()
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ status: 'approved' }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ))
+
+    await expect(api.activate('ABCD-EFGH', 'demo', 'test@ith5.cn', 'password')).resolves.toEqual({ status: 'approved' })
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/device/activate', expect.objectContaining({ method: 'POST' }))
   })
 })
 
