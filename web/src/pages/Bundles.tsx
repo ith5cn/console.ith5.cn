@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { ArrowLeft, FileCode2, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { ArrowLeft, FileCode2, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { api, type Bundle, type FileItem, type VersionInfo } from '../api'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog'
@@ -14,12 +14,52 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Textarea } from '@/components/ui/textarea'
 import { Empty, Err, fmtTime, PageHeader, TableSkeleton, useAsync } from '../ui'
 
+type Filters = { q: string; kind: string; status: string; group: string }
+const EMPTY_FILTERS: Filters = { q: '', kind: 'all', status: 'all', group: 'all' }
+
+const STATUSES: { value: string; label: string; match: (b: Bundle) => boolean }[] = [
+  { value: 'published', label: '已发布', match: (b) => !b.archived && b.latest_version > 0 },
+  { value: 'draft', label: '未发布', match: (b) => !b.archived && b.latest_version === 0 },
+  { value: 'ungranted', label: '未授权给任何组', match: (b) => !b.archived && !b.groups?.length },
+  { value: 'archived', label: '已归档', match: (b) => b.archived },
+]
+
+// 内容库随着团队增长会变成几百行的表，光靠翻页找不到东西。
+// 过滤全在前端做：列表接口一次返回全量，再发请求只会更慢。
+function filterBundles(bundles: Bundle[], f: Filters) {
+  const q = f.q.trim().toLowerCase()
+  return bundles.filter((b) => {
+    if (q && !`${b.name} ${b.description} ${b.kind}`.toLowerCase().includes(q)) return false
+    if (f.kind !== 'all' && b.kind !== f.kind) return false
+    if (f.status !== 'all' && !STATUSES.find((x) => x.value === f.status)?.match(b)) return false
+    if (f.group !== 'all' && !b.groups?.includes(f.group)) return false
+    return true
+  })
+}
+
 export function Bundles() {
   const { data, err, loading, reload } = useAsync(() => api.listBundles())
   const [editing, setEditing] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
+  const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS)
+  const set = (patch: Partial<Filters>) => setFilters((f) => ({ ...f, ...patch }))
+  const all = useMemo(() => data?.bundles ?? [], [data])
+  const groupNames = useMemo(() => [...new Set(all.flatMap((b) => b.groups ?? []))].sort(), [all])
+  const rows = useMemo(() => filterBundles(all, filters), [all, filters])
+  const filtered = JSON.stringify(filters) !== JSON.stringify(EMPTY_FILTERS)
   if (editing) return <Editor id={editing} onBack={() => { setEditing(null); reload() }} />
-  return <><PageHeader title="内容库" description="管理可分发的 skill、command、agent、hook、workflow、standard、setting 与 MCP 配置。" action={<Button onClick={() => setCreating(true)}><Plus />新建内容</Button>} /><div className="mb-4 flex justify-end"><Button variant="outline" size="sm" onClick={reload}><RefreshCw />刷新</Button></div><Create open={creating} onOpenChange={setCreating} onDone={(id) => { setCreating(false); setEditing(id) }} /><Err msg={err} />{loading ? <TableSkeleton /> : !data?.bundles.length ? <Empty>还没有内容，先新建一个</Empty> : <Card className="overflow-hidden"><Table><TableHeader><TableRow><TableHead>内容</TableHead><TableHead>类型</TableHead><TableHead>版本</TableHead><TableHead>权限组</TableHead><TableHead>更新时间</TableHead><TableHead /></TableRow></TableHeader><TableBody>{data.bundles.map((b: Bundle) => <TableRow key={b.id}><TableCell><div className="font-medium">{b.name}{b.archived && <Badge variant="warning" className="ml-2">已归档</Badge>}</div><div className="mt-1 max-w-md text-xs text-muted-foreground">{b.description}</div></TableCell><TableCell><Badge variant={b.kind === 'skill' ? 'accent' : b.kind === 'setting' || b.kind === 'mcp' ? 'warning' : 'default'}>{b.kind}</Badge></TableCell><TableCell className="font-mono">{b.latest_version > 0 ? `v${b.latest_version}` : <span className="font-sans text-muted-foreground">未发布</span>}</TableCell><TableCell>{b.groups?.length ? b.groups.map((g) => <Badge key={g} variant="outline" className="mr-1">{g}</Badge>) : <span className="text-muted-foreground">—</span>}</TableCell><TableCell className="whitespace-nowrap text-muted-foreground">{fmtTime(b.updated_at)}</TableCell><TableCell className="text-right"><Button variant="ghost" size="sm" onClick={() => setEditing(b.id)}>打开</Button></TableCell></TableRow>)}</TableBody></Table></Card>}</>
+  return <><PageHeader title="内容库" description="管理可分发的 skill、command、agent、hook、workflow、standard、setting 与 MCP 配置。" action={<Button onClick={() => setCreating(true)}><Plus />新建内容</Button>} />
+    <div className="mb-4 flex flex-wrap items-center gap-2">
+      <div className="relative min-w-56 flex-1 sm:max-w-xs"><Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input aria-label="搜索内容" className="pl-8" placeholder="搜索名称、说明或类型" value={filters.q} onChange={(e) => set({ q: e.target.value })} /></div>
+      <Select value={filters.kind} onValueChange={(v) => set({ kind: v })}><SelectTrigger aria-label="按类型筛选" className="w-36"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部类型</SelectItem>{KINDS.map((k) => <SelectItem key={k.value} value={k.value}>{k.value}</SelectItem>)}</SelectContent></Select>
+      <Select value={filters.status} onValueChange={(v) => set({ status: v })}><SelectTrigger aria-label="按状态筛选" className="w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部状态</SelectItem>{STATUSES.map((x) => <SelectItem key={x.value} value={x.value}>{x.label}</SelectItem>)}</SelectContent></Select>
+      {groupNames.length > 0 && <Select value={filters.group} onValueChange={(v) => set({ group: v })}><SelectTrigger aria-label="按权限组筛选" className="w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部权限组</SelectItem>{groupNames.map((g) => <SelectItem key={g} value={g}>{g}</SelectItem>)}</SelectContent></Select>}
+      {filtered && <Button variant="ghost" size="sm" onClick={() => setFilters(EMPTY_FILTERS)}><X />清除筛选</Button>}
+      <span className="text-xs text-muted-foreground">{filtered ? `${rows.length} / ${all.length} 项` : `共 ${all.length} 项`}</span>
+      <Button variant="outline" size="sm" className="ml-auto" onClick={reload}><RefreshCw />刷新</Button>
+    </div>
+    <Create open={creating} onOpenChange={setCreating} onDone={(id) => { setCreating(false); setEditing(id) }} /><Err msg={err} />{loading ? <TableSkeleton /> : !all.length ? <Empty>还没有内容，先新建一个</Empty> : !rows.length ? <Empty>没有匹配的内容，换个关键词或清除筛选</Empty> : <Card className="overflow-hidden"><Table><TableHeader><TableRow><TableHead>内容</TableHead><TableHead>类型</TableHead><TableHead>版本</TableHead><TableHead>权限组</TableHead><TableHead>更新时间</TableHead><TableHead /></TableRow></TableHeader><TableBody>{rows.map((b: Bundle) => <TableRow key={b.id}><TableCell><div className="font-medium">{b.name}{b.archived && <Badge variant="warning" className="ml-2">已归档</Badge>}</div><div className="mt-1 max-w-md text-xs text-muted-foreground">{b.description}</div></TableCell><TableCell><Badge variant={b.kind === 'skill' ? 'accent' : b.kind === 'setting' || b.kind === 'mcp' ? 'warning' : 'default'}>{b.kind}</Badge></TableCell><TableCell className="font-mono">{b.latest_version > 0 ? `v${b.latest_version}` : <span className="font-sans text-muted-foreground">未发布</span>}</TableCell><TableCell>{b.groups?.length ? b.groups.map((g) => <Badge key={g} variant="outline" className="mr-1">{g}</Badge>) : <span className="text-muted-foreground">—</span>}</TableCell><TableCell className="whitespace-nowrap text-muted-foreground">{fmtTime(b.updated_at)}</TableCell><TableCell className="text-right"><Button variant="ghost" size="sm" onClick={() => setEditing(b.id)}>打开</Button></TableCell></TableRow>)}</TableBody></Table></Card>}
+  </>
 }
 
 // 每个 kind 的落盘契约。写在一处，避免下拉说明、正文模板与提示三处各说各的。

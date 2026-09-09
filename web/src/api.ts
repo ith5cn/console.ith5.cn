@@ -68,6 +68,9 @@ export interface ExplainEntry {
 
 const TOKEN_KEY = 'ith5_token'
 const USER_KEY = 'ith5_user'
+// 组织标识（slug）不在 UserInfo 里——服务端只回 org_id。CLI 登录要的是 slug，
+// 概览页要把它显示出来，所以登录时顺手记下用户填的那个。
+const ORG_KEY = 'ith5_org'
 export const DEMO_READ_ONLY_MESSAGE = '当前是演示环境，无法修改'
 
 export function getToken() { return localStorage.getItem(TOKEN_KEY) }
@@ -75,9 +78,11 @@ export function getUser(): UserInfo | null {
   const raw = localStorage.getItem(USER_KEY)
   return raw ? JSON.parse(raw) : null
 }
+export function getOrgSlug() { return localStorage.getItem(ORG_KEY) ?? '' }
 export function clearAuth() {
   localStorage.removeItem(TOKEN_KEY)
   localStorage.removeItem(USER_KEY)
+  localStorage.removeItem(ORG_KEY)
 }
 
 export class ApiError extends Error {
@@ -118,6 +123,7 @@ export const api = {
       '/auth/login', { method: 'POST', body: JSON.stringify({ org_slug, email, password }) })
     localStorage.setItem(TOKEN_KEY, r.access_token)
     localStorage.setItem(USER_KEY, JSON.stringify(r.user))
+    localStorage.setItem(ORG_KEY, org_slug)
     return r.user
   },
 

@@ -1,8 +1,10 @@
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api, DEMO_READ_ONLY_MESSAGE, type UserInfo } from '@/api'
+import { api, type Bundle, DEMO_READ_ONLY_MESSAGE, type UserInfo } from '@/api'
 import { AppShell } from '@/components/AppShell'
+import { QuickStart } from '@/components/QuickStart'
+import { Bundles } from '@/pages/Bundles'
 import { Login } from '@/pages/Login'
 import { Overview } from '@/pages/Overview'
 import { toCSV } from '@/ui'
@@ -116,6 +118,86 @@ describe('Overview', () => {
     render(<Overview />)
     expect(await screen.findByText('内容服务不可用')).toBeInTheDocument()
     expect(screen.getByText('暂无分发事件')).toBeInTheDocument()
+  })
+})
+
+describe('Bundles filtering', () => {
+  const bundle = (id: string, patch: Partial<Bundle> = {}): Bundle => ({ id, name: id, kind: 'skill', description: '', archived: false, latest_version: 1, checksum: '', updated_at: '', ...patch })
+
+  async function renderList() {
+    vi.spyOn(api, 'listBundles').mockResolvedValue({ bundles: [
+      bundle('api-review', { description: '审查接口改动' }),
+      bundle('deploy-agent', { kind: 'agent', groups: ['sre'] }),
+      bundle('draft-only', { latest_version: 0 }),
+    ] })
+    render(<Bundles />)
+    await screen.findByText('api-review')
+  }
+
+  it('matches the query against name and description', async () => {
+    await renderList()
+    await userEvent.type(screen.getByLabelText('搜索内容'), '审查接口')
+    expect(screen.getByText('api-review')).toBeInTheDocument()
+    expect(screen.queryByText('deploy-agent')).not.toBeInTheDocument()
+    expect(screen.getByText('1 / 3 项')).toBeInTheDocument()
+  })
+
+  it('filters by status and clears back to the full list', async () => {
+    await renderList()
+    await userEvent.click(screen.getByLabelText('按状态筛选'))
+    await userEvent.click(screen.getByRole('option', { name: '未发布' }))
+    expect(screen.getByText('draft-only')).toBeInTheDocument()
+    expect(screen.queryByText('api-review')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /清除筛选/ }))
+    expect(screen.getByText('api-review')).toBeInTheDocument()
+    expect(screen.getByText('共 3 项')).toBeInTheDocument()
+  })
+
+  it('explains an empty result instead of looking broken', async () => {
+    await renderList()
+    await userEvent.type(screen.getByLabelText('搜索内容'), 'zzz')
+    expect(screen.getByText(/没有匹配的内容/)).toBeInTheDocument()
+  })
+})
+
+describe('QuickStart', () => {
+  const signIn = (role: string, email = 'owner@example.com') => {
+    localStorage.setItem('ith5_user', JSON.stringify({ id: 'u', email, role, org_id: 'o' }))
+    localStorage.setItem('ith5_org', 'acme')
+  }
+
+  // 命令是给人抄到自己机器上跑的，必须指向线上服务端，不能跟着后台的
+  // 打开地址（localhost、内网 IP）变。
+  it('points the install commands at the public server, not the current origin', () => {
+    signIn('owner')
+    render(<QuickStart />)
+    expect(screen.getByText('curl -fsSL https://console.ith5.cn/install.sh | sh')).toBeInTheDocument()
+    expect(screen.getByText('ITH5_SERVER=https://console.ith5.cn ith5 login')).toBeInTheDocument()
+    expect(screen.getByText('ith5 sync')).toBeInTheDocument()
+  })
+
+  it('hands the demo credentials to read-only visitors', () => {
+    signIn('viewer', 'test@ith5.cn')
+    render(<QuickStart />)
+    expect(screen.getByText('test@ith5.cn')).toBeInTheDocument()
+    expect(screen.getByText('xLzhQrXMPs6JTEcgignI0p0j')).toBeInTheDocument()
+  })
+
+  it('never shows the shared demo password to a real member', () => {
+    signIn('admin')
+    render(<QuickStart />)
+    expect(screen.queryByText('xLzhQrXMPs6JTEcgignI0p0j')).not.toBeInTheDocument()
+    expect(screen.getByText('acme')).toBeInTheDocument()
+    expect(screen.getByText('owner@example.com')).toBeInTheDocument()
+  })
+
+  it('copies a command to the clipboard', async () => {
+    signIn('owner')
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    render(<QuickStart />)
+    await userEvent.click(screen.getByRole('button', { name: '复制命令：ith5 sync' }))
+    expect(writeText).toHaveBeenCalledWith('ith5 sync')
   })
 })
 
