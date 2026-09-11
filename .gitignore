@@ -9,10 +9,9 @@
 .env
 .env.local
 /bin/
-/db/
-/dist/
 /tmp/
 coverage.out
-deploy/ith5cn/
 node_modules/
 web/dist/*
+/ith5-server
+/ith5-materialize

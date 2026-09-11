@@ -1,30 +1,120 @@
 import { useState } from 'react'
-import { Layers3, Plus, Settings2 } from 'lucide-react'
+import { Plus } from 'lucide-react'
 import { toast } from 'sonner'
-import { api, type Group } from '../api'
+import { api, can, type Group } from '@/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
-import { Empty, Err, PageHeader, TableSkeleton, useAsync } from '../ui'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Empty, Err, PageHeader, TableSkeleton, useAsync } from '@/ui'
 
 export function Groups() {
-  const groups = useAsync(() => api.listGroups()); const bundles = useAsync(() => api.listBundles()); const [editing, setEditing] = useState<Group | null>(null); const [creating, setCreating] = useState(false)
-  return <><PageHeader title="权限组" description={<>权限组装配内容，再授权给成员。组内内容变化后，被授权者下次同步自动获得更新。</>} action={<Button onClick={() => setCreating(true)}><Plus />新建权限组</Button>} /><Create open={creating} onOpenChange={setCreating} onDone={() => { setCreating(false); groups.reload() }} /><Err msg={groups.err} />{groups.loading ? <TableSkeleton /> : !groups.data?.groups.length ? <Empty>还没有权限组</Empty> : <div className="grid gap-4 md:grid-cols-2">{groups.data.groups.map((g) => <Card key={g.id}><CardHeader><CardTitle className="flex items-center gap-2"><Layers3 className="size-4 text-primary" />{g.name}{g.archived && <Badge variant="warning">已归档</Badge>}</CardTitle><p className="font-mono text-xs text-muted-foreground">{g.key}</p></CardHeader><CardContent><p className="min-h-5 text-sm text-muted-foreground">{g.description || '暂无说明'}</p><div className="mt-4 flex flex-wrap gap-1.5">{g.bundle_names.length ? g.bundle_names.slice(0, 4).map((n) => <Badge key={n} variant="outline">{n}</Badge>) : <Badge>空组</Badge>}{g.bundle_names.length > 4 && <Badge>+{g.bundle_names.length - 4}</Badge>}</div></CardContent><CardFooter className="border-t pt-4 text-xs text-muted-foreground"><span>{g.bundle_names.length} 项内容 · {g.assigned_to} 条授权</span><Button variant="ghost" size="sm" className="ml-auto" onClick={() => setEditing(g)}><Settings2 />装配</Button></CardFooter></Card>)}</div>}{editing && bundles.data && <Assemble group={editing} all={bundles.data.bundles} open={!!editing} onOpenChange={(open) => !open && setEditing(null)} onDone={() => { setEditing(null); groups.reload() }} />}</>
+  const { data, err, loading, reload } = useAsync(() => api.groups())
+  const [creating, setCreating] = useState(false)
+  const [editing, setEditing] = useState<Group | null>(null)
+  const manage = can('membership:manage')
+
+  async function archive(g: Group) {
+    try {
+      await api.updateGroup(g.id, g.name, g.description, !g.archived)
+      toast.success(g.archived ? '已恢复' : '已归档')
+      reload()
+    } catch (e) { toast.error((e as Error).message) }
+  }
+
+  return (
+    <>
+      <PageHeader
+        title="权限组"
+        description="有名字的可选内容包。放进任一权限组的资源不再按层级自动分发，只发给被授权的人或项目。对 teamai 客户端它就是一个 role 命名空间。"
+        action={manage && <Button onClick={() => setCreating(true)}><Plus />新建权限组</Button>}
+      />
+      <Err msg={err} />
+      {loading ? <TableSkeleton /> : !data?.items.length ? <Empty>还没有权限组。</Empty> : (
+        <Card className="overflow-hidden">
+          <Table>
+            <TableHeader><TableRow><TableHead>权限组</TableHead><TableHead>内容</TableHead><TableHead>授权数</TableHead><TableHead /></TableRow></TableHeader>
+            <TableBody>
+              {data.items.map((g) => (
+                <TableRow key={g.id} className={g.archived ? 'opacity-60' : ''}>
+                  <TableCell><div className="font-medium">{g.name}{g.archived && <Badge variant="secondary" className="ml-2">已归档</Badge>}</div><div className="font-mono text-xs text-muted-foreground">{g.key}</div>{g.description && <div className="text-xs text-muted-foreground">{g.description}</div>}</TableCell>
+                  <TableCell className="text-sm">{g.bundle_names.length ? g.bundle_names.join(', ') : <span className="text-muted-foreground">空</span>}</TableCell>
+                  <TableCell className="tabular-nums">{g.assigned_to}</TableCell>
+                  <TableCell className="text-right">{manage && <><Button variant="ghost" size="sm" onClick={() => setEditing(g)}>编辑内容</Button><Button variant="ghost" size="sm" onClick={() => archive(g)}>{g.archived ? '恢复' : '归档'}</Button></>}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Card>
+      )}
+      {creating && <CreateGroup onClose={() => { setCreating(false); reload() }} />}
+      {editing && <EditGroupBundles group={editing} onClose={() => { setEditing(null); reload() }} />}
+    </>
+  )
 }
 
-function Create({ open, onOpenChange, onDone }: { open: boolean; onOpenChange: (v: boolean) => void; onDone: () => void }) {
-  const [key, setKey] = useState(''); const [name, setName] = useState(''); const [desc, setDesc] = useState(''); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false)
-  async function submit(e: React.FormEvent) { e.preventDefault(); setBusy(true); setErr(''); try { await api.createGroup(key, name, desc); toast.success('权限组已创建'); onDone() } catch (error) { setErr((error as Error).message) } finally { setBusy(false) } }
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent><DialogHeader><DialogTitle>新建权限组</DialogTitle><DialogDescription>用稳定标识组织一组可持续更新的内容。</DialogDescription></DialogHeader><form onSubmit={submit} className="space-y-4"><div className="space-y-2"><Label htmlFor="group-key">标识</Label><Input id="group-key" value={key} onChange={(e) => setKey(e.target.value)} placeholder="backend-pack" required autoFocus /></div><div className="space-y-2"><Label htmlFor="group-name">显示名</Label><Input id="group-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="后端工具包" required /></div><div className="space-y-2"><Label htmlFor="group-desc">说明</Label><Input id="group-desc" value={desc} onChange={(e) => setDesc(e.target.value)} /></div><Err msg={err} /><DialogFooter><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>取消</Button><Button disabled={busy || !key || !name}>{busy ? '创建中…' : '创建'}</Button></DialogFooter></form></DialogContent></Dialog>
+function CreateGroup({ onClose }: { onClose: () => void }) {
+  const [key, setKey] = useState('')
+  const [name, setName] = useState('')
+  const [desc, setDesc] = useState('')
+  const [err, setErr] = useState('')
+  async function submit() {
+    try {
+      await api.createGroup(key, name, desc)
+      toast.success('已创建')
+      onClose()
+    } catch (e) { setErr((e as Error).message) }
+  }
+  return (
+    <Dialog open onOpenChange={onClose}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>新建权限组</DialogTitle><DialogDescription>key 会成为 teamai 端的 role 命名空间，建好后不能改。</DialogDescription></DialogHeader>
+        <div className="grid gap-3">
+          <div className="space-y-1"><Label htmlFor="g-key">key</Label><Input id="g-key" value={key} onChange={(e) => setKey(e.target.value)} placeholder="backend-pack" /></div>
+          <div className="space-y-1"><Label htmlFor="g-name">名称</Label><Input id="g-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="后端工具包" /></div>
+          <div className="space-y-1"><Label htmlFor="g-desc">描述</Label><Input id="g-desc" value={desc} onChange={(e) => setDesc(e.target.value)} /></div>
+        </div>
+        <Err msg={err} />
+        <DialogFooter><Button variant="outline" onClick={onClose}>取消</Button><Button onClick={submit} disabled={!key || !name}>创建</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
 }
 
-function Assemble({ group, all, open, onOpenChange, onDone }: { group: Group; all: { id: string; name: string; kind: string }[]; open: boolean; onOpenChange: (v: boolean) => void; onDone: () => void }) {
-  const [sel, setSel] = useState<string[]>(group.bundle_ids); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false)
-  const toggle = (id: string) => setSel(sel.includes(id) ? sel.filter((x) => x !== id) : [...sel, id])
-  async function save() { setBusy(true); setErr(''); try { await api.setGroupBundles(group.id, sel); toast.success('权限组装配已更新'); onDone() } catch (error) { setErr((error as Error).message) } finally { setBusy(false) } }
-  return <Sheet open={open} onOpenChange={onOpenChange}><SheetContent><SheetHeader><SheetTitle>装配「{group.name}」</SheetTitle><SheetDescription>一个内容可以同时属于多个权限组，保存后下次同步生效。</SheetDescription></SheetHeader><div className="grid gap-2">{all.map((b) => <label key={b.id} className="flex cursor-pointer items-center gap-3 rounded-lg border p-3 hover:bg-muted"><input type="checkbox" className="size-4 accent-primary" checked={sel.includes(b.id)} onChange={() => toggle(b.id)} /><span className="min-w-0 flex-1 truncate font-medium">{b.name}</span><Badge>{b.kind}</Badge></label>)}</div><Err msg={err} /><div className="mt-auto flex justify-end gap-2 border-t pt-5"><Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button><Button onClick={save} disabled={busy}>{busy ? '保存中…' : `保存（${sel.length} 项）`}</Button></div></SheetContent></Sheet>
+function EditGroupBundles({ group, onClose }: { group: Group; onClose: () => void }) {
+  const resources = useAsync(() => api.resources())
+  const [selected, setSelected] = useState<Set<string>>(new Set(group.bundle_ids))
+  const [err, setErr] = useState('')
+  function toggle(id: string) {
+    setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
+  }
+  async function save() {
+    try {
+      await api.setGroupBundles(group.id, Array.from(selected))
+      toast.success('已保存')
+      onClose()
+    } catch (e) { setErr((e as Error).message) }
+  }
+  return (
+    <Dialog open onOpenChange={onClose}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader><DialogTitle>{group.name} 的内容</DialogTitle><DialogDescription>勾选的资源只经这个权限组分发，不再随层级自动下发。</DialogDescription></DialogHeader>
+        <div className="max-h-[50vh] overflow-auto rounded-md border">
+          {resources.loading ? <TableSkeleton rows={3} /> : (resources.data?.items ?? []).filter((r) => !r.deleted && r.kind !== 'learning').map((r) => (
+            <label key={r.id} className="flex cursor-pointer items-center gap-3 border-b px-3 py-2 text-sm last:border-0 hover:bg-muted">
+              <input type="checkbox" checked={selected.has(r.id)} onChange={() => toggle(r.id)} />
+              <Badge variant="secondary">{r.kind}</Badge>
+              <span className="font-medium">{r.name}</span>
+              <span className="text-xs text-muted-foreground">{r.level === 'org' ? '组织' : r.namespace}</span>
+            </label>
+          ))}
+        </div>
+        <Err msg={err} />
+        <DialogFooter><Button variant="outline" onClick={onClose}>取消</Button><Button onClick={save}>保存</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
 }

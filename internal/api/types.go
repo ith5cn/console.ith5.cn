@@ -1,17 +1,84 @@
-// Package api 是 HTTP 层：认证、schema 校验与响应映射。
-// 事务与业务规则不进入本包（技术方案 §4）。
 package api
 
 import "time"
 
-// ---- 认证 ----
+// ---- 发现 ----
 
-type DeviceStartReq struct {
-	Fingerprint string `json:"fingerprint"`
-	Hostname    string `json:"hostname"`
-	OS          string `json:"os"`
+// CapabilitiesResp 是 GET /v1/capabilities 的响应。
+type CapabilitiesResp struct {
+	Version string `json:"version"`
+	// APIVersion 是路径前缀 /v1 对应的契约版本；MinClientVersion 是服务端还愿意服务的最低客户端版本。
+	APIVersion       string   `json:"api_version"`
+	MinClientVersion string   `json:"min_client_version"`
+	Auth             []string `json:"auth"`
+	Limits           Limits   `json:"limits"`
 }
 
+// Limits 是服务端上限，客户端据此配置自己，不硬编码。
+type Limits struct {
+	MaxBlobBytes     int `json:"max_blob_bytes"`
+	MaxSnapshotBytes int `json:"max_snapshot_bytes"`
+	MaxEntries       int `json:"max_entries"`
+}
+
+// ---- 认证 ----
+
+// LoginReq 是密码登录请求。
+type LoginReq struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+// LoginResp 返回账号与可进入的组织；不含令牌，令牌是组织内的。
+type LoginResp struct {
+	Account       AccountInfo      `json:"account"`
+	LoginToken    string           `json:"login_token"`
+	Organizations []MembershipInfo `json:"organizations"`
+}
+
+// SessionReq 用登录凭据换取某组织的会话令牌。
+type SessionReq struct {
+	LoginToken string `json:"login_token"`
+	UserID     string `json:"user_id"`
+}
+
+// AccountInfo 是全局账号的展示信息。
+type AccountInfo struct {
+	ID    string `json:"id"`
+	Email string `json:"email"`
+	Name  string `json:"name"`
+}
+
+// MembershipInfo 是某组织内的成员身份。
+type MembershipInfo struct {
+	UserID  string `json:"user_id"`
+	OrgID   string `json:"org_id"`
+	OrgSlug string `json:"org_slug"`
+	OrgName string `json:"org_name"`
+	Role    string `json:"role"`
+}
+
+// TokenResp 是签发结果。
+type TokenResp struct {
+	AccessToken  string         `json:"access_token"`
+	RefreshToken string         `json:"refresh_token,omitempty"`
+	TokenType    string         `json:"token_type"`
+	ExpiresIn    int            `json:"expires_in"`
+	MachineID    string         `json:"machine_id,omitempty"`
+	Membership   MembershipInfo `json:"membership"`
+	// EnrollmentProjectIDs 非空表示这次登录带了接入码，客户端应据此创建绑定。
+	EnrollmentProjectIDs []string `json:"enrollment_project_ids,omitempty"`
+}
+
+// DeviceStartReq 是 CLI 发起设备授权。
+type DeviceStartReq struct {
+	Fingerprint    string `json:"fingerprint"`
+	Hostname       string `json:"hostname"`
+	OS             string `json:"os"`
+	EnrollmentCode string `json:"enrollment_code,omitempty"`
+}
+
+// DeviceStartResp 只在这一次返回 device_code。
 type DeviceStartResp struct {
 	DeviceCode      string `json:"device_code"`
 	UserCode        string `json:"user_code"`
@@ -20,226 +87,295 @@ type DeviceStartResp struct {
 	ExpiresIn       int    `json:"expires_in"`
 }
 
+// DevicePollReq 是 CLI 轮询。
 type DevicePollReq struct {
 	DeviceCode string `json:"device_code"`
 }
 
-type TokenResp struct {
-	AccessToken  string   `json:"access_token"`
-	RefreshToken string   `json:"refresh_token,omitempty"`
-	ExpiresIn    int      `json:"expires_in"`
-	User         UserInfo `json:"user,omitempty"`
-	MachineID    string   `json:"machine_id,omitempty"`
+// DevicePeekResp 供审批页展示它正在批准什么。
+type DevicePeekResp struct {
+	Hostname   string        `json:"hostname"`
+	OS         string        `json:"os"`
+	ExpiresAt  time.Time     `json:"expires_at"`
+	Enrollment *EnrollmentIn `json:"enrollment,omitempty"`
 }
 
-type UserInfo struct {
-	ID    string `json:"id"`
-	Email string `json:"email"`
-	Role  string `json:"role"`
-	OrgID string `json:"org_id"`
+// EnrollmentIn 是接入码在审批页里的摘要。
+type EnrollmentIn struct {
+	ID         string   `json:"id"`
+	ProjectIDs []string `json:"project_ids"`
+	// Allowed 表示当前登录者对这些项目都有读权限，可以批准。
+	Allowed bool `json:"allowed"`
 }
 
+// DeviceActivateReq 是浏览器端批准。
+type DeviceActivateReq struct {
+	UserCode string `json:"user_code"`
+}
+
+// RefreshReq 是刷新凭据轮换。
 type RefreshReq struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
-type DeviceActivateReq struct {
-	UserCode string `json:"user_code"`
-	OrgSlug  string `json:"org_slug"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
+// RevokeReq 撤销自己的设备凭据；不带 machine_id 时撤销当前令牌对应的设备。
+type RevokeReq struct {
+	MachineID string `json:"machine_id,omitempty"`
 }
 
-// ---- 分发 ----
-
-// ManifestResp 只含元数据，不含正文。
-// CLI 拿它跟本地 lock 对比后决定下载什么（技术方案 §8.2）。
-type ManifestResp struct {
-	GeneratedAt time.Time        `json:"generated_at"`
-	TTLSeconds  int              `json:"ttl_seconds"`
-	Bundles     []ManifestBundle `json:"bundles"`
+// CreateOrganizationReq 用登录令牌自建组织：登录后还不属于任何组织的人从这里开始。
+type CreateOrganizationReq struct {
+	LoginToken string `json:"login_token"`
+	Name       string `json:"name"`
+	Slug       string `json:"slug"`
 }
 
-type ManifestBundle struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Kind        string `json:"kind"`
-	Version     int    `json:"version"`
-	Checksum    string `json:"checksum"`
-	Description string `json:"description"`
-	// Via 说明这个 Bundle 是凭什么拿到的，供 CLI 展示与排障（T27）。
-	Via []GrantSourceInfo `json:"via,omitempty"`
+// CreateOrganizationResp 返回新组织的成员身份，前端拿它换会话令牌。
+type CreateOrganizationResp struct {
+	Organization OrganizationInfo `json:"organization"`
+	Membership   MembershipInfo   `json:"membership"`
 }
 
-type GrantSourceInfo struct {
-	SubjectType string `json:"subject_type"`
-	GroupName   string `json:"group_name,omitempty"`
+// MeResp 是当前调用方。
+type MeResp struct {
+	Account     AccountInfo    `json:"account"`
+	Membership  MembershipInfo `json:"membership"`
+	MachineID   string         `json:"machine_id,omitempty"`
+	TokenKind   string         `json:"token_kind"`
+	Permissions []string       `json:"permissions"`
 }
 
-type BundleVersionResp struct {
-	ID       string     `json:"id"`
-	Name     string     `json:"name"`
-	Kind     string     `json:"kind"`
-	Version  int        `json:"version"`
-	Checksum string     `json:"checksum"`
-	Files    []FileJSON `json:"files"`
+// ---- 组织 ----
+
+// OrganizationInfo 是组织展示信息。
+type OrganizationInfo struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Slug      string    `json:"slug"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
-type FileJSON struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+// UpdateOrganizationReq 改组织名。
+type UpdateOrganizationReq struct {
+	Name string `json:"name"`
 }
 
-// ---- 回执 ----
-
-type DistributionEventsReq struct {
-	Events []DistributionEventJSON `json:"events"`
+// PolicyJSON 是组织策略。
+type PolicyJSON struct {
+	RequiredApprovals int     `json:"required_approvals"`
+	LearningsReview   bool    `json:"learnings_review"`
+	ConfidencePrune   float64 `json:"confidence_prune"`
+	ConfidencePromote float64 `json:"confidence_promote"`
+	RetentionMonths   int     `json:"retention_months"`
 }
 
-type DistributionEventJSON struct {
-	EventID    string         `json:"event_id"`
-	BundleID   string         `json:"bundle_id"`
-	Version    int            `json:"version"`
-	Action     string         `json:"action"`
-	Detail     map[string]any `json:"detail,omitempty"`
-	OccurredAt time.Time      `json:"occurred_at"`
+// TeamInfo 是团队。
+type TeamInfo struct {
+	ID        string           `json:"id"`
+	Name      string           `json:"name"`
+	Slug      string           `json:"slug"`
+	Archived  bool             `json:"archived"`
+	CreatedAt time.Time        `json:"created_at"`
+	Members   []TeamMemberInfo `json:"members,omitempty"`
 }
 
-type AcceptedResp struct {
-	Accepted int `json:"accepted"`
+// TeamMemberInfo 是团队成员。
+type TeamMemberInfo struct {
+	UserID string `json:"user_id"`
+	Email  string `json:"email"`
+	Name   string `json:"name"`
+	Role   string `json:"role"`
 }
 
-// ---- 错误 ----
-
-type ErrorResp struct {
-	Error     string `json:"error"`
-	Message   string `json:"message"`
-	RequestID string `json:"request_id,omitempty"`
+// CreateTeamReq 建团队。
+type CreateTeamReq struct {
+	Name string `json:"name"`
+	Slug string `json:"slug"`
 }
 
-// ---- 管理后台 ----
-
-type BundleSummary struct {
-	ID            string    `json:"id"`
-	Name          string    `json:"name"`
-	Kind          string    `json:"kind"`
-	Description   string    `json:"description"`
-	Archived      bool      `json:"archived"`
-	LatestVersion int       `json:"latest_version"`
-	Checksum      string    `json:"checksum"`
-	Groups        []string  `json:"groups,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at"`
+// UpdateTeamReq 改团队。
+type UpdateTeamReq struct {
+	Name     string `json:"name"`
+	Archived bool   `json:"archived"`
 }
 
-type BundleDetailResp struct {
-	BundleSummary
-	DraftFiles []FileJSON `json:"draft_files"`
+// PutMemberRoleReq 团队或项目内的角色。
+type PutMemberRoleReq struct {
+	Role string `json:"role"`
 }
 
-type VersionInfo struct {
-	Version   int    `json:"version"`
-	Checksum  string `json:"checksum"`
-	Changelog string `json:"changelog"`
-	// RollbackOfVersion 非零表示本版是对该版本的回滚。
-	// changelog 是自由文本，承担不了这个职责。
-	RollbackOfVersion int       `json:"rollback_of_version,omitempty"`
-	PublishedBy       string    `json:"published_by"`
-	PublishedAt       time.Time `json:"published_at"`
+// ReviewersReq 覆盖 reviewer 名单。
+type ReviewersReq struct {
+	UserIDs []string `json:"user_ids"`
 }
 
-type GroupInfo struct {
-	ID          string   `json:"id"`
-	Key         string   `json:"key"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Archived    bool     `json:"archived"`
-	BundleIDs   []string `json:"bundle_ids"`
-	BundleNames []string `json:"bundle_names"`
-	AssignedTo  int      `json:"assigned_to"`
+// ReviewerInfo 是一位 reviewer。
+type ReviewerInfo struct {
+	UserID string `json:"user_id"`
+	Email  string `json:"email"`
 }
 
-type AssignmentInfo struct {
-	ID          string     `json:"id"`
-	BundleID    string     `json:"bundle_id,omitempty"`
-	BundleName  string     `json:"bundle_name,omitempty"`
-	GroupID     string     `json:"group_id,omitempty"`
-	GroupName   string     `json:"group_name,omitempty"`
-	SubjectType string     `json:"subject_type"`
-	SubjectID   string     `json:"subject_id,omitempty"`
-	SubjectName string     `json:"subject_name,omitempty"`
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-	Expired     bool       `json:"expired"`
-	CreatedAt   time.Time  `json:"created_at"`
-}
-
+// MemberInfo 是组织成员。
 type MemberInfo struct {
-	ID         string     `json:"id"`
+	UserID     string     `json:"user_id"`
 	Email      string     `json:"email"`
 	Name       string     `json:"name"`
 	Role       string     `json:"role"`
 	Status     string     `json:"status"`
 	Machines   int        `json:"machines"`
 	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
 }
 
-type AuditEntry struct {
-	Email      string    `json:"email"`
-	Hostname   string    `json:"hostname"`
-	BundleName string    `json:"bundle_name"`
-	Version    int       `json:"version"`
-	Action     string    `json:"action"`
-	Detail     string    `json:"detail,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
+// CreateMemberReq 邀请密码账号。
+type CreateMemberReq struct {
+	Email    string `json:"email"`
+	Name     string `json:"name"`
+	Role     string `json:"role"`
+	Password string `json:"password"`
 }
 
-type StaleMachine struct {
-	Email      string    `json:"email"`
-	Hostname   string    `json:"hostname"`
-	LastSeenAt time.Time `json:"last_seen_at"`
-	Days       int       `json:"days"`
-	// UserLevel 为 true 表示该用户所有设备都掉队 —— 可能已离职未处理。
-	UserLevel bool `json:"user_level"`
+// MemberStatusReq 停用或启用。
+type MemberStatusReq struct {
+	Status string `json:"status"`
 }
 
-type ExplainEntry struct {
-	BundleID   string            `json:"bundle_id"`
-	BundleName string            `json:"bundle_name"`
-	Kind       string            `json:"kind"`
-	Version    int               `json:"version"`
-	Via        []GrantSourceInfo `json:"via"`
+// MemberRoleReq 改组织角色。
+type MemberRoleReq struct {
+	Role string `json:"role"`
 }
 
-// ExecutionEventJSON 是 L0 执行事件的上报格式。
-//
-// 字段集合即隐私白名单：服务端会用严格 schema 重建 summary，
-// 未知字段一律丢弃（技术方案 §10.4）。
-type ExecutionEventJSON struct {
-	ID         string       `json:"id"`
-	SessionID  string       `json:"session_id"`
-	EventType  string       `json:"event_type"`
-	ToolName   string       `json:"tool_name,omitempty"`
-	Summary    EventSummary `json:"summary"`
-	OccurredAt time.Time    `json:"occurred_at"`
+// PasswordReq 重置密码。
+type PasswordReq struct {
+	Password string `json:"password"`
 }
 
-type EventSummary struct {
-	Repo         string `json:"repo,omitempty"`
-	FilePath     string `json:"file_path,omitempty"`
-	BashCommand  string `json:"bash_command,omitempty"`
-	LinesChanged int    `json:"lines_changed,omitempty"`
-	ExitCode     *int   `json:"exit_code,omitempty"`
+// ---- 项目与绑定 ----
+
+// ProjectInfo 是项目。
+type ProjectInfo struct {
+	ID        string           `json:"id"`
+	TeamID    string           `json:"team_id,omitempty"`
+	Name      string           `json:"name"`
+	Slug      string           `json:"slug"`
+	Archived  bool             `json:"archived"`
+	CreatedAt time.Time        `json:"created_at"`
+	Members   []TeamMemberInfo `json:"members,omitempty"`
 }
 
-type ExecutionEventsReq struct {
-	Events []ExecutionEventJSON `json:"events"`
+// CreateProjectReq 建项目。
+type CreateProjectReq struct {
+	Name   string `json:"name"`
+	Slug   string `json:"slug"`
+	TeamID string `json:"team_id,omitempty"`
 }
 
-type ExecutionEntry struct {
-	Email      string       `json:"email"`
-	Hostname   string       `json:"hostname"`
-	SessionID  string       `json:"session_id"`
-	EventType  string       `json:"event_type"`
-	ToolName   string       `json:"tool_name,omitempty"`
-	Summary    EventSummary `json:"summary"`
-	OccurredAt time.Time    `json:"occurred_at"`
+// UpdateProjectReq 改项目。
+type UpdateProjectReq struct {
+	Name     string `json:"name"`
+	TeamID   string `json:"team_id"`
+	Archived bool   `json:"archived"`
+}
+
+// BindingReq 创建或修改绑定。
+type BindingReq struct {
+	WorkspaceID string   `json:"workspace_id,omitempty"`
+	DisplayName string   `json:"display_name"`
+	ProjectIDs  []string `json:"project_ids"`
+}
+
+// BindingInfo 是绑定。
+type BindingInfo struct {
+	ID              string     `json:"id"`
+	MachineID       string     `json:"machine_id"`
+	WorkspaceID     string     `json:"workspace_id"`
+	DisplayName     string     `json:"display_name"`
+	ProjectIDs      []string   `json:"project_ids"`
+	AppliedRevision string     `json:"applied_revision,omitempty"`
+	State           string     `json:"state"`
+	LastSyncAt      *time.Time `json:"last_sync_at,omitempty"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	ETag            string     `json:"etag"`
+}
+
+// ---- 设备与接入码 ----
+
+// DeviceInfo 是设备。
+type DeviceInfo struct {
+	ID         string     `json:"id"`
+	UserID     string     `json:"user_id"`
+	Email      string     `json:"email"`
+	Hostname   string     `json:"hostname"`
+	OS         string     `json:"os"`
+	LastSeenAt time.Time  `json:"last_seen_at"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
+// RenameDeviceReq 改设备名。
+type RenameDeviceReq struct {
+	Hostname string `json:"hostname"`
+}
+
+// CreateEnrollmentReq 签发接入码。
+type CreateEnrollmentReq struct {
+	ProjectIDs []string `json:"project_ids"`
+	TTLHours   int      `json:"ttl_hours,omitempty"`
+	MaxUses    int      `json:"max_uses,omitempty"`
+}
+
+// EnrollmentInfo 是接入码；Code 只在创建响应里出现一次。
+type EnrollmentInfo struct {
+	ID         string     `json:"id"`
+	Code       string     `json:"code,omitempty"`
+	ProjectIDs []string   `json:"project_ids"`
+	CreatedBy  string     `json:"created_by,omitempty"`
+	ExpiresAt  time.Time  `json:"expires_at"`
+	MaxUses    int        `json:"max_uses"`
+	UsedCount  int        `json:"used_count"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	// Command 是给员工的完整接入命令。
+	Command string `json:"command,omitempty"`
+}
+
+// ---- 身份源 ----
+
+// IdPConfigJSON 是 OIDC 配置；ClientSecret 只写不读。
+type IdPConfigJSON struct {
+	ID           string   `json:"id,omitempty"`
+	Issuer       string   `json:"issuer"`
+	ClientID     string   `json:"client_id"`
+	ClientSecret string   `json:"client_secret,omitempty"`
+	Scopes       []string `json:"scopes"`
+	Enabled      bool     `json:"enabled"`
+}
+
+// GroupMappingJSON 是用户组到角色的映射。
+type GroupMappingJSON struct {
+	IdPGroup string `json:"idp_group"`
+	Target   string `json:"target"`
+	TargetID string `json:"target_id,omitempty"`
+	Role     string `json:"role"`
+	Priority int    `json:"priority"`
+}
+
+// ---- 审计 ----
+
+// AuditEventInfo 是审计记录。
+type AuditEventInfo struct {
+	ID         string         `json:"id"`
+	ActorEmail string         `json:"actor_email,omitempty"`
+	Type       string         `json:"type"`
+	TargetType string         `json:"target_type"`
+	TargetID   string         `json:"target_id"`
+	Detail     map[string]any `json:"detail"`
+	RequestID  string         `json:"request_id,omitempty"`
+	OccurredAt time.Time      `json:"occurred_at"`
+}
+
+// Page 是分页响应的通用外壳。
+type Page[T any] struct {
+	Items      []T    `json:"items"`
+	NextCursor string `json:"next_cursor,omitempty"`
 }

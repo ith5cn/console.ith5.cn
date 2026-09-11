@@ -1,64 +1,43 @@
+// Package db 是仓储层：把领域包声明的 Store 接口落到 PostgreSQL。
+//
+// 所有业务查询都必须显式带 org_id，禁止仅凭 UUID 查询。
+// 跨模块的表不在这里互相 JOIN 业务语义，只做各自模块的读写。
 package db
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
-	"time"
+	"errors"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/stdlib"
-	"github.com/pressly/goose/v3"
 
-	migrations "github.com/ith5/ith5/db"
+	"github.com/ith5/ith5/internal/platform/pg"
 )
 
-// DB 是数据访问入口。所有业务查询都必须显式带 org_id
-// —— 禁止仅凭资源 UUID 查询（技术方案 §2 原则 8）。
+// DB 持有连接池；各模块的 Store 实现都是它的方法集。
 type DB struct {
 	pool *pgxpool.Pool
 }
 
+// Open 建立连接池。
 func Open(ctx context.Context, dsn string) (*DB, error) {
-	cfg, err := pgxpool.ParseConfig(dsn)
+	pool, err := pg.Open(ctx, dsn)
 	if err != nil {
-		return nil, fmt.Errorf("解析 DSN: %w", err)
-	}
-	cfg.MaxConns = 10
-	cfg.MaxConnLifetime = time.Hour
-
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("建立连接池: %w", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("连接数据库: %w", err)
+		return nil, err
 	}
 	return &DB{pool: pool}, nil
 }
 
+// New 用已有连接池构造，供测试复用。
+func New(pool *pgxpool.Pool) *DB { return &DB{pool: pool} }
+
+// Close 关闭连接池。
 func (d *DB) Close() { d.pool.Close() }
 
+// Pool 暴露连接池，只给健康检查与测试用。
 func (d *DB) Pool() *pgxpool.Pool { return d.pool }
 
-// Migrate 应用所有未执行的迁移。迁移脚本已编译进二进制。
-func Migrate(ctx context.Context, dsn string) error {
-	sqlDB, err := sql.Open("pgx", dsn)
-	if err != nil {
-		return fmt.Errorf("打开迁移连接: %w", err)
-	}
-	defer sqlDB.Close()
+// ErrNotFound 表示记录不存在。各模块的 Store 把它翻译成自己的哨兵错误。
+var ErrNotFound = errors.New("db: 记录不存在")
 
-	goose.SetBaseFS(migrations.Migrations)
-	goose.SetLogger(goose.NopLogger())
-	if err := goose.SetDialect("postgres"); err != nil {
-		return err
-	}
-	if err := goose.UpContext(ctx, sqlDB, "migrations"); err != nil {
-		return fmt.Errorf("执行迁移: %w", err)
-	}
-	return nil
-}
-
-var _ = stdlib.GetDefaultDriver // 确保 pgx 的 database/sql 驱动被注册
+func isNoRows(err error) bool { return errors.Is(err, pgx.ErrNoRows) }

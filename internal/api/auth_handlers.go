@@ -1,183 +1,310 @@
 package api
 
 import (
-	"errors"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
-	"github.com/ith5/ith5/internal/auth"
-	"github.com/ith5/ith5/internal/db"
+	"github.com/ith5/ith5/internal/identity"
+	"github.com/ith5/ith5/internal/organizations"
+	"github.com/ith5/ith5/internal/platform/httpx"
 )
 
-// deviceStart 创建设备码。CLI 是终端程序，不适合处理密码，故走 device code。
-func (s *Server) deviceStart(w http.ResponseWriter, r *http.Request) {
-	var req DeviceStartReq
-	if !s.decode(w, r, &req) {
+// login 校验密码，返回账号与可进入的组织。令牌是组织内的，由 session 接口签发。
+func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	var req LoginReq
+	if err := httpx.Decode(w, r, &req); err != nil {
+		httpx.WriteError(w, r, s.log, err)
 		return
 	}
-	if req.Fingerprint == "" {
-		s.fail(w, r, http.StatusBadRequest, "bad_request", "fingerprint 必填")
+	email := identity.NormalizeEmail(req.Email)
+	if !s.passwordLimit.Allow(httpx.ClientIP(r) + "|" + email) {
+		httpx.WriteError(w, r, s.log, httpx.ErrRateLimited)
 		return
 	}
-
-	code, err := auth.RandomToken()
+	res, err := s.Identity.LoginWithPassword(r.Context(), email, req.Password)
 	if err != nil {
-		s.internal(w, r, err, "生成设备码")
+		httpx.WriteError(w, r, s.log, mapErr(err))
 		return
 	}
-	userCode, err := auth.NewUserCode()
+	loginTok, err := s.Identity.Signer().IssueLogin(res.Account.ID, time.Now())
 	if err != nil {
-		s.internal(w, r, err, "生成用户码")
+		httpx.WriteError(w, r, s.log, err)
 		return
 	}
-	expires := time.Now().Add(auth.DeviceCodeTTL)
-	if err := s.db.CreateDeviceCode(r.Context(), auth.HashToken(code), userCode,
-		req.Fingerprint, req.Hostname, req.OS, expires); err != nil {
-		s.internal(w, r, err, "保存设备码")
-		return
+	resp := LoginResp{
+		Account:       accountInfo(res.Account),
+		LoginToken:    loginTok,
+		Organizations: make([]MembershipInfo, 0, len(res.Memberships)),
 	}
+	for _, m := range res.Memberships {
+		resp.Organizations = append(resp.Organizations, membershipInfo(m))
+	}
+	httpx.WriteJSON(w, http.StatusOK, resp)
+}
 
-	s.writeJSON(w, http.StatusOK, DeviceStartResp{
-		DeviceCode:      code,
-		UserCode:        userCode,
-		VerificationURL: s.baseURL + "/activate",
-		Interval:        5,
-		ExpiresIn:       int(auth.DeviceCodeTTL.Seconds()),
+// session 用登录凭据换取某组织的会话令牌。
+func (s *Server) session(w http.ResponseWriter, r *http.Request) {
+	var req SessionReq
+	if err := httpx.Decode(w, r, &req); err != nil {
+		httpx.WriteError(w, r, s.log, err)
+		return
+	}
+	claims, err := s.Identity.Signer().Verify(req.LoginToken, identity.TokenKindLogin)
+	if err != nil {
+		httpx.WriteError(w, r, s.log, httpx.New(http.StatusUnauthorized, httpx.CodeAuthRequired, "登录凭据无效或已过期"))
+		return
+	}
+	toks, err := s.Identity.IssueSession(r.Context(), claims.Subject, req.UserID)
+	if err != nil {
+		httpx.WriteError(w, r, s.log, mapErr(err))
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, tokenResp(toks))
+}
+
+// createOrganization 用登录令牌建组织并成为 owner。
+// 放在认证入口组：此时还没有组织，也就没有组织内的会话令牌可用。
+func (s *Server) createOrganization(w http.ResponseWriter, r *http.Request) {
+	var req CreateOrganizationReq
+	if err := httpx.Decode(w, r, &req); err != nil {
+		httpx.WriteError(w, r, s.log, err)
+		return
+	}
+	claims, err := s.Identity.Signer().Verify(req.LoginToken, identity.TokenKindLogin)
+	if err != nil {
+		httpx.WriteError(w, r, s.log, httpx.New(http.StatusUnauthorized, httpx.CodeAuthRequired, "登录凭据无效或已过期"))
+		return
+	}
+	o, userID, err := s.Orgs.CreateOrganization(r.Context(), claims.Subject, req.Name, req.Slug)
+	if err != nil {
+		httpx.WriteError(w, r, s.log, mapErr(err))
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, CreateOrganizationResp{
+		Organization: OrganizationInfo{ID: o.ID, Name: o.Name, Slug: o.Slug, CreatedAt: o.CreatedAt},
+		Membership:   MembershipInfo{UserID: userID, OrgID: o.ID, OrgSlug: o.Slug, OrgName: o.Name, Role: "owner"},
 	})
 }
 
-// devicePoll 轮询设备码。批准后单次消费，同一个码只可能成功一次。
+// deviceStart 创建设备码。CLI 是终端程序，不适合处理密码，故走设备码。
+// 带接入码时先校验接入码可用，把它记在设备码上。
+func (s *Server) deviceStart(w http.ResponseWriter, r *http.Request) {
+	var req DeviceStartReq
+	if err := httpx.Decode(w, r, &req); err != nil {
+		httpx.WriteError(w, r, s.log, err)
+		return
+	}
+	if req.Fingerprint == "" {
+		httpx.WriteError(w, r, s.log, httpx.Validation("fingerprint 必填"))
+		return
+	}
+	enrollmentID := ""
+	if req.EnrollmentCode != "" {
+		e, err := s.Enrollments.Resolve(r.Context(), strings.TrimSpace(req.EnrollmentCode))
+		if err != nil {
+			httpx.WriteError(w, r, s.log, mapErr(err))
+			return
+		}
+		enrollmentID = e.ID
+	}
+	res, err := s.Identity.DeviceStart(r.Context(), req.Fingerprint, req.Hostname, req.OS, enrollmentID)
+	if err != nil {
+		httpx.WriteError(w, r, s.log, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, DeviceStartResp{
+		DeviceCode: res.DeviceCode, UserCode: res.UserCode, VerificationURL: res.VerificationURL,
+		Interval: res.Interval, ExpiresIn: res.ExpiresIn,
+	})
+}
+
+// devicePoll 由 CLI 轮询；批准后签发设备令牌与刷新凭据。
 func (s *Server) devicePoll(w http.ResponseWriter, r *http.Request) {
 	var req DevicePollReq
-	if !s.decode(w, r, &req) {
+	if err := httpx.Decode(w, r, &req); err != nil {
+		httpx.WriteError(w, r, s.log, err)
 		return
 	}
-	hash := auth.HashToken(req.DeviceCode)
-
-	userID, machineID, err := s.db.ConsumeDeviceCode(r.Context(), hash)
-	if errors.Is(err, db.ErrNotFound) {
-		// 还没批准，或已过期，或码不存在——区分开来给 CLI 正确的退避信号
-		status, expired, sErr := s.db.DeviceCodeStatus(r.Context(), hash)
-		switch {
-		case errors.Is(sErr, db.ErrNotFound):
-			s.fail(w, r, http.StatusGone, "expired", "设备码不存在或已失效")
-		case sErr != nil:
-			s.internal(w, r, sErr, "查询设备码状态")
-		case expired || status == "consumed":
-			s.fail(w, r, http.StatusGone, "expired", "设备码已失效，请重新登录")
-		default:
-			s.fail(w, r, http.StatusPreconditionRequired, "authorization_pending", "等待用户在浏览器中批准")
-		}
-		return
-	}
+	toks, err := s.Identity.DevicePoll(r.Context(), req.DeviceCode)
 	if err != nil {
-		s.internal(w, r, err, "消费设备码")
+		httpx.WriteError(w, r, s.log, mapErr(err))
 		return
 	}
-	s.issueTokens(w, r, userID, machineID, true)
+	httpx.WriteJSON(w, http.StatusOK, tokenResp(toks))
 }
 
-// deviceActivate 是 Web 端的批准动作：登录 + 输入 CLI 显示的 user_code。
+// devicePeek 让审批页看到它在批准什么：设备信息、接入码限定的项目、当前登录者能否批准。
+func (s *Server) devicePeek(w http.ResponseWriter, r *http.Request) {
+	dc, e, err := s.Identity.PeekDeviceCode(r.Context(), r.URL.Query().Get("user_code"))
+	if err != nil {
+		httpx.WriteError(w, r, s.log, mapErr(err))
+		return
+	}
+	resp := DevicePeekResp{Hostname: dc.Hostname, OS: dc.OS, ExpiresAt: dc.ExpiresAt}
+	if e != nil {
+		p := principalFrom(r)
+		resp.Enrollment = &EnrollmentIn{ID: e.ID, ProjectIDs: e.ProjectIDs, Allowed: s.enrollmentAllowed(p, *e)}
+	}
+	httpx.WriteJSON(w, http.StatusOK, resp)
+}
+
+// deviceActivate 是浏览器端的批准：已登录成员输入 CLI 显示的 user_code。
+//
+// 带接入码的设备码：接入码不授予任何成员身份，批准者必须本来就对那些项目有读权限。
 func (s *Server) deviceActivate(w http.ResponseWriter, r *http.Request) {
 	var req DeviceActivateReq
-	if !s.decode(w, r, &req) {
+	if err := httpx.Decode(w, r, &req); err != nil {
+		httpx.WriteError(w, r, s.log, err)
 		return
 	}
-	if !s.allowPassword(r, req.OrgSlug+"/"+req.Email) {
-		w.Header().Set("Retry-After", "60")
-		s.fail(w, r, http.StatusTooManyRequests, "rate_limited",
-			"该账号的尝试过于频繁，请稍后再试")
-		return
-	}
-	user, pwHash, err := s.db.GetUserByEmail(r.Context(), req.OrgSlug, req.Email)
-	if err != nil || pwHash == "" {
-		// 固定文案，不泄露账号是否存在
-		s.fail(w, r, http.StatusUnauthorized, "unauthorized", "账号或密码不正确")
-		return
-	}
-	ok, err := auth.VerifyPassword(req.Password, pwHash)
-	if err != nil || !ok {
-		s.fail(w, r, http.StatusUnauthorized, "unauthorized", "账号或密码不正确")
-		return
-	}
-	if user.Suspended {
-		s.fail(w, r, http.StatusForbidden, "suspended", "账号已停用")
-		return
-	}
-
-	userCode := auth.NormalizeUserCode(req.UserCode)
-	dc, err := s.db.GetDeviceCodeByUserCode(r.Context(), userCode)
+	p := principalFrom(r)
+	_, e, err := s.Identity.PeekDeviceCode(r.Context(), req.UserCode)
 	if err != nil {
-		s.fail(w, r, http.StatusNotFound, "not_found", "验证码无效或已过期")
+		httpx.WriteError(w, r, s.log, mapErr(err))
 		return
 	}
-	machineID, err := s.db.UpsertMachine(r.Context(), user.ID, dc.Fingerprint, dc.Hostname, dc.OS)
-	if err != nil {
-		s.internal(w, r, err, "登记设备")
+	if e != nil && !s.enrollmentAllowed(p, *e) {
+		httpx.WriteError(w, r, s.log, httpx.New(http.StatusForbidden, httpx.CodeAccessDenied,
+			"接入码限定的项目你没有访问权限，请联系管理员先把你加入项目"))
 		return
 	}
-	if err := s.db.ApproveDeviceCode(r.Context(), userCode, user.ID, machineID); err != nil {
-		s.fail(w, r, http.StatusNotFound, "not_found", "验证码无效或已过期")
+	if err := s.Identity.DeviceApprove(r.Context(), p.UserID, req.UserCode); err != nil {
+		httpx.WriteError(w, r, s.log, mapErr(err))
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]string{"status": "approved"})
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "approved"})
 }
 
+func (s *Server) enrollmentAllowed(p Principal, e identity.Enrollment) bool {
+	if e.OrgID != p.OrgID {
+		return false
+	}
+	for _, pid := range e.ProjectIDs {
+		if !p.Subject.Can(organizations.PermProjectRead, organizations.ProjectScope(pid)) {
+			return false
+		}
+	}
+	return true
+}
+
+// refresh 轮换刷新凭据。
 func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 	var req RefreshReq
-	if !s.decode(w, r, &req) {
+	if err := httpx.Decode(w, r, &req); err != nil {
+		httpx.WriteError(w, r, s.log, err)
 		return
 	}
-	userID, machineID, err := s.db.UseRefreshToken(r.Context(), auth.HashToken(req.RefreshToken))
-	switch {
-	case errors.Is(err, db.ErrSuspended):
-		// 让 CLI 能识别「已被撤权」并触发本地清理（技术方案 §5 离职回收）
-		s.fail(w, r, http.StatusUnauthorized, "revoked", "账号已停用")
-		return
-	case errors.Is(err, db.ErrNotFound):
-		s.fail(w, r, http.StatusUnauthorized, "invalid_grant", "刷新令牌无效或已过期")
-		return
-	case err != nil:
-		s.internal(w, r, err, "校验刷新令牌")
+	toks, err := s.Identity.Refresh(r.Context(), req.RefreshToken)
+	if err != nil {
+		httpx.WriteError(w, r, s.log, mapErr(err))
 		return
 	}
-	s.issueTokens(w, r, userID, machineID, false)
+	httpx.WriteJSON(w, http.StatusOK, tokenResp(toks))
 }
 
-// issueTokens 签发访问令牌；withRefresh 时一并签发刷新令牌。
-func (s *Server) issueTokens(w http.ResponseWriter, r *http.Request, userID, machineID string, withRefresh bool) {
-	user, err := s.db.GetUser(r.Context(), userID)
+// revoke 撤销自己某台设备的刷新凭据。
+func (s *Server) revoke(w http.ResponseWriter, r *http.Request) {
+	var req RevokeReq
+	if err := httpx.DecodeLenient(w, r, &req); err != nil {
+		httpx.WriteError(w, r, s.log, err)
+		return
+	}
+	p := principalFrom(r)
+	machineID := req.MachineID
+	if machineID == "" {
+		machineID = p.MachineID
+	}
+	if machineID == "" {
+		httpx.WriteError(w, r, s.log, httpx.Validation("machine_id 必填"))
+		return
+	}
+	if err := s.Identity.Logout(r.Context(), p.UserID, machineID); err != nil {
+		httpx.WriteError(w, r, s.log, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
+}
+
+// me 返回当前调用方及其组织级权限。
+func (s *Server) me(w http.ResponseWriter, r *http.Request) {
+	p := principalFrom(r)
+	perms := p.Subject.Permissions(organizations.OrgScope(p.OrgID))
+	out := make([]string, len(perms))
+	for i, x := range perms {
+		out[i] = string(x)
+	}
+	httpx.WriteJSON(w, http.StatusOK, MeResp{
+		Account:     AccountInfo{ID: p.AccountID, Email: p.Email, Name: p.Name},
+		Membership:  membershipInfo(p.Membership),
+		MachineID:   p.MachineID,
+		TokenKind:   string(p.TokenKind),
+		Permissions: out,
+	})
+}
+
+// ---------------------------------------------------------------
+// OIDC（浏览器）
+// ---------------------------------------------------------------
+
+// oidcAuthorize 按组织 slug 跳转到该组织的 IdP。
+func (s *Server) oidcAuthorize(w http.ResponseWriter, r *http.Request) {
+	if s.OIDC == nil {
+		httpx.WriteError(w, r, s.log, mapErr(identity.ErrOIDCNotConfigured))
+		return
+	}
+	org, err := s.Orgs.Store().GetOrganizationBySlug(r.Context(), r.URL.Query().Get("org"))
 	if err != nil {
-		s.internal(w, r, err, "读取用户")
+		httpx.WriteError(w, r, s.log, httpx.Validation("org 参数无效"))
 		return
 	}
-	if user.Suspended {
-		s.fail(w, r, http.StatusForbidden, "suspended", "账号已停用")
-		return
-	}
-	access, err := s.signer.Issue(user.ID, user.OrgID, user.Role, machineID, auth.PurposeCLI, time.Now())
+	u, err := s.OIDC.BeginBrowser(r.Context(), org.ID)
 	if err != nil {
-		s.internal(w, r, err, "签发访问令牌")
+		httpx.WriteError(w, r, s.log, mapErr(err))
 		return
 	}
-	resp := TokenResp{
-		AccessToken: access,
-		ExpiresIn:   int(auth.AccessTokenTTL.Seconds()),
-		MachineID:   machineID,
-		User:        UserInfo{ID: user.ID, Email: user.Email, Role: user.Role, OrgID: user.OrgID},
+	http.Redirect(w, r, u, http.StatusFound)
+}
+
+// oidcCallback 完成登录，签发会话令牌后把浏览器送回前端。
+//
+// 令牌放在 URL fragment 里：fragment 不会进服务端日志，也不会随 Referer 泄露。
+func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
+	if s.OIDC == nil {
+		httpx.WriteError(w, r, s.log, mapErr(identity.ErrOIDCNotConfigured))
+		return
 	}
-	if withRefresh {
-		refreshTok, err := auth.RandomToken()
-		if err != nil {
-			s.internal(w, r, err, "生成刷新令牌")
-			return
-		}
-		if err := s.db.CreateRefreshToken(r.Context(), auth.HashToken(refreshTok),
-			user.ID, machineID, time.Now().Add(auth.RefreshTokenTTL)); err != nil {
-			s.internal(w, r, err, "保存刷新令牌")
-			return
-		}
-		resp.RefreshToken = refreshTok
+	q := r.URL.Query()
+	if e := q.Get("error"); e != "" {
+		http.Redirect(w, r, s.BaseURL+"/login?error="+url.QueryEscape(e), http.StatusFound)
+		return
 	}
-	s.writeJSON(w, http.StatusOK, resp)
+	m, err := s.OIDC.CompleteBrowser(r.Context(), q.Get("state"), q.Get("code"))
+	if err != nil {
+		http.Redirect(w, r, s.BaseURL+"/login?error="+url.QueryEscape(httpx.AsError(mapErr(err)).Message), http.StatusFound)
+		return
+	}
+	toks, err := s.Identity.IssueSession(r.Context(), m.AccountID, m.UserID)
+	if err != nil {
+		http.Redirect(w, r, s.BaseURL+"/login?error="+url.QueryEscape(httpx.AsError(mapErr(err)).Message), http.StatusFound)
+		return
+	}
+	http.Redirect(w, r, s.BaseURL+"/login/oidc#access_token="+url.QueryEscape(toks.AccessToken), http.StatusFound)
+}
+
+func tokenResp(t identity.Tokens) TokenResp {
+	return TokenResp{
+		AccessToken: t.AccessToken, RefreshToken: t.RefreshToken, TokenType: "Bearer",
+		ExpiresIn: t.ExpiresIn, MachineID: t.MachineID, Membership: membershipInfo(t.Membership),
+		EnrollmentProjectIDs: t.EnrollmentProjectIDs,
+	}
+}
+
+func accountInfo(a identity.Account) AccountInfo {
+	return AccountInfo{ID: a.ID, Email: a.Email, Name: a.Name}
+}
+
+func membershipInfo(m identity.Membership) MembershipInfo {
+	return MembershipInfo{UserID: m.UserID, OrgID: m.OrgID, OrgSlug: m.OrgSlug, OrgName: m.OrgName, Role: string(m.Role)}
 }
