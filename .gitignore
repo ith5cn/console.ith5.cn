@@ -13,3 +13,5 @@
 coverage.out
 node_modules/
 web/dist/*
+/ith5-server
+/ith5-materialize
