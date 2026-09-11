@@ -24,6 +24,18 @@ PostgreSQL. English design docs live in [docs/en/](./docs/en/).</sub>
 > 这个仓库的目标是成为 teamai-cli issue #341 所描述的「Go 管理后端」的实现，
 > 最终以 `server/` 的形式贡献到 teamai-cli。在此之前它独立发布，接口以 [docs/开发规格.md](./docs/开发规格.md) 为准。
 
+## 架构一图
+
+![ith5-server 架构](docs/images/architecture-server.svg)
+
+员工机器上的 teamai-cli 走 `/v1` 拉快照、提交变更集、上报数据；管理员在嵌入的后台审核发布；企业身份源通过 OIDC 接入。
+服务端是分层单体，每个领域一个包，数据全在 PostgreSQL 里。
+
+![teamai-cli 内部与 server 模式](docs/images/architecture-teamai-cli.svg)
+
+teamai-cli 的四种团队仓来源都只负责把"当前应得的资源"放进同一个目录，后面的资源处理链与各 AI 工具的适配完全共用。
+`server` 模式是 [contrib/teamai-cli/](./contrib/teamai-cli/) 里的补丁新增的：不需要 Git，读写与上报全走后台。
+
 ## 它解决什么
 
 teamai-cli 用一个 Git 仓库承载团队资源：clone、branch、push、MR。对开发者很自然，对不熟悉 Git 的人是门槛；
