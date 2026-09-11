@@ -1,0 +1,2096 @@
+From 937c5fc42fd23815a56b7077b25532204e6dfb0b Mon Sep 17 00:00:00 2001
+From: ith5 <dev@ith5.local>
+Date: Fri, 11 Sep 2026 09:32:38 -0700
+Subject: [PATCH] =?UTF-8?q?feat:=20server=20repo=20kind=20=E2=80=94=20git-?=
+ =?UTF-8?q?free=20team=20backend=20(teamai=20init=20--server)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Adds repo.kind 'server' backed by the TeamAI management backend (issue #341):
+device-flow login, project binding, full-snapshot pull with content by hash
+and 304, push/remove as change sets, contribute as a learning, usage/vote/
+session reports over HTTP. No git anywhere on the member's machine.
+---
+ README.md                          |  15 +
+ src/__tests__/server-repo.test.ts  | 201 ++++++++++
+ src/__tests__/server-write.test.ts | 105 ++++++
+ src/contribute.ts                  |   7 +
+ src/hook-handlers.ts               |   9 +
+ src/index.ts                       |   5 +-
+ src/init.ts                        | 224 +++++++++++
+ src/pull.ts                        |  41 +-
+ src/push.ts                        |   7 +
+ src/remove.ts                      |   7 +
+ src/server-format.ts               | 234 ++++++++++++
+ src/server-repo.ts                 | 580 +++++++++++++++++++++++++++++
+ src/server-write.ts                | 400 ++++++++++++++++++++
+ src/status.ts                      |  11 +-
+ src/types.ts                       |  13 +-
+ 15 files changed, 1851 insertions(+), 8 deletions(-)
+ create mode 100644 src/__tests__/server-repo.test.ts
+ create mode 100644 src/__tests__/server-write.test.ts
+ create mode 100644 src/server-format.ts
+ create mode 100644 src/server-repo.ts
+ create mode 100644 src/server-write.ts
+
+diff --git a/README.md b/README.md
+index 7c0815b..99be7f4 100644
+--- a/README.md
++++ b/README.md
+@@ -52,6 +52,21 @@ teamai init https://github.com/yourorg/yourrepo --scope user
+ 
+ Once initialized, every AI session automatically pulls the latest skills / rules and other Harness updates published by admins — no manual sync needed.
+ 
++### Team server (no git)
++
++Teams that run the TeamAI management backend do not need a git repo at all. Members log in with a
++one-time code shown in the browser, pick the projects this directory should follow, and everything
++else — pull, push, contribute, usage reports — goes over HTTP:
++
++```bash
++teamai init --server https://teamai.example.com            # approve the code in your browser
++teamai init --server https://teamai.example.com --code ABCD-1234   # or paste an admin's enrollment code
++teamai push        # becomes a change set reviewed in the console
++teamai contribute  # published (or reviewed, per org policy) with secret scanning
++```
++
++The current directory needs no `.git`, no remote and no credentials on disk beyond the device token.
++
+ > **Full usage guide:** [docs/usage-guide.md](docs/usage-guide.md) ([中文版](docs/usage-guide.zh-CN.md)) — covers everything from team creation to day-to-day use.
+ 
+ ## Product architecture
+diff --git a/src/__tests__/server-repo.test.ts b/src/__tests__/server-repo.test.ts
+new file mode 100644
+index 0000000..6e5fb56
+--- /dev/null
++++ b/src/__tests__/server-repo.test.ts
+@@ -0,0 +1,201 @@
++import fs from 'node:fs';
++import os from 'node:os';
++import path from 'node:path';
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++
++let tmpHome: string;
++vi.mock('../utils/home.js', () => ({ getUserHome: () => tmpHome }));
++
++import { renderSnapshot, type ServerSnapshot } from '../server-format.js';
++import { applyFiles, classify, deviceLogin, loadJournal, sha256Hex, syncServerRepo, saveCredentials, purgeOwned } from '../server-repo.js';
++import type { LocalConfig } from '../types.js';
++
++function blobStore(files: Record<string, string>) {
++  const store = new Map<string, Buffer>();
++  const ref = (content: string) => {
++    const b = Buffer.from(content);
++    const sha = `sha256:${sha256Hex(b)}`;
++    store.set(sha, b);
++    return { sha256: sha, size: b.length };
++  };
++  const entries = Object.fromEntries(Object.entries(files).map(([k, v]) => [k, ref(v)]));
++  return { store, entries, read: async (sha: string) => store.get(sha)! };
++}
++
++function snapshot(): { snap: ServerSnapshot; read: (sha: string) => Promise<Buffer>; store: Map<string, Buffer> } {
++  const { store, entries, read } = blobStore({
++    skill: '---\ndescription: deploy\n---\n\nsteps\n',
++    ref: '# checklist\n',
++    rule: '# naming\n',
++    agent: 'name: reviewer\ndescription: r\ninstructions: |\n  review\n',
++    env: 'value: https://api\ndescription: gateway\n',
++    secret: 'secret: true\ndescription: token\n',
++    hook: 'id: lint\nevent: PostToolUse\ncommand: scripts/lint.sh\n',
++    script: '#!/bin/sh\necho ok\n',
++    mcp: 'name: fs\ntransport: stdio\ncommand: npx\n',
++    claudemd: '# conventions\n',
++    culture: '# culture\n',
++    learning: '---\ntitle: t\n---\nbody\n',
++  });
++  const snap: ServerSnapshot = {
++    revision: 'sha256:rev1',
++    org: { id: 'o', slug: 'acme', name: 'Acme' },
++    projects: [{ id: 'p1', slug: 'billing', name: 'Billing' }],
++    policy: { enforced_rules: ['naming'], hooks_auto_apply: true, recall_enabled: true },
++    culture: { kind: 'culture', name: 'culture', status: 'ok', files: [{ path: 'CULTURE.md', ...entries.culture }] },
++    resources: [
++      { kind: 'skill', name: 'deploy', namespace: 'billing', status: 'ok', tags: ['ops'], files: [{ path: 'SKILL.md', ...entries.skill }, { path: 'references/checklist.md', ...entries.ref }] },
++      { kind: 'rule', name: 'naming', status: 'ok', files: [{ path: 'RULE.md', ...entries.rule }] },
++      { kind: 'agent', name: 'reviewer', status: 'ok', files: [{ path: 'AGENT.yaml', ...entries.agent }] },
++      { kind: 'env', name: 'API_BASE', status: 'ok', files: [{ path: 'ENV.yaml', ...entries.env }] },
++      { kind: 'env', name: 'API_TOKEN', status: 'ok', files: [{ path: 'ENV.yaml', ...entries.secret }] },
++      { kind: 'hook', name: 'lint', status: 'ok', files: [{ path: 'HOOK.yaml', ...entries.hook }, { path: 'scripts/lint.sh', ...entries.script }] },
++      { kind: 'mcp', name: 'fs', status: 'ok', files: [{ path: 'MCP.yaml', ...entries.mcp }] },
++      { kind: 'claudemd', name: 'conventions', namespace: 'common', status: 'ok', files: [{ path: 'CLAUDEMD.md', ...entries.claudemd }] },
++      { kind: 'learning', name: 'l1', status: 'ok', files: [{ path: 'LEARNING.md', ...entries.learning }] },
++      { kind: 'rule', name: 'clash', status: 'conflict', conflict: { owners: ['a', 'b'] } },
++    ],
++  };
++  return { snap, read, store };
++}
++
++beforeEach(() => {
++  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'teamai-server-'));
++});
++afterEach(() => {
++  vi.unstubAllGlobals();
++  fs.rmSync(tmpHome, { recursive: true, force: true });
++});
++
++describe('renderSnapshot', () => {
++  it('produces the flat team-repo layout', async () => {
++    const { snap, read } = snapshot();
++    const files = await renderSnapshot(snap, read, 'https://console.example');
++    const paths = [...files.keys()].sort();
++    expect(paths).toEqual([
++      'agents/reviewer.yaml', 'claudemd/common/conventions.md', 'culture.md', 'env/env.yaml', 'hooks/hooks.yaml',
++      'hooks/scripts/lint.sh', 'learnings/l1.md', 'mcp/mcp.yaml', 'rules/naming.md',
++      'skills/deploy/SKILL.md', 'skills/deploy/references/checklist.md', 'tags.yaml', 'teamai.yaml',
++    ]);
++    expect(files.get('env/env.yaml')!.toString()).toBe(
++      'variables:\n  - key: API_BASE\n    value: https://api\n    description: gateway\n  - key: API_TOKEN\n    value: ""\n    # secret: 值不在服务端，需在本机设置\n    description: token\n',
++    );
++    expect(files.get('hooks/hooks.yaml')!.toString()).toBe('hooks:\n  - id: lint\n    event: PostToolUse\n    command: scripts/lint.sh\n');
++    const teamai = files.get('teamai.yaml')!.toString();
++    expect(teamai).toContain('team: "acme"');
++    expect(teamai).toContain('mode: server');
++    expect(teamai).toContain('enforced: ["naming"]');
++    expect(files.get('tags.yaml')!.toString()).toBe('version: 1\nskills:\n  deploy: ["ops"]\n');
++  });
++});
++
++describe('applyFiles', () => {
++  it('installs, updates our own files, and never overwrites local edits', async () => {
++    const localPath = path.join(tmpHome, 'team-repo');
++    const v1 = new Map([['rules/a.md', Buffer.from('a1')], ['rules/b.md', Buffer.from('b1')]]);
++    const first = await applyFiles(localPath, v1, { revision: '', files: {} });
++    expect(first.results.map((r) => r.action)).toEqual(['installed', 'installed']);
++
++    // member edits b; server updates both and drops nothing
++    fs.writeFileSync(path.join(localPath, 'rules/b.md'), 'mine');
++    const v2 = new Map([['rules/a.md', Buffer.from('a2')], ['rules/b.md', Buffer.from('b2')]]);
++    const second = await applyFiles(localPath, v2, first.journal);
++    expect(second.results).toEqual([
++      { kind: 'rule', name: 'a', action: 'updated' },
++      { kind: 'rule', name: 'b', action: 'conflict_skipped' },
++    ]);
++    expect(fs.readFileSync(path.join(localPath, 'rules/b.md'), 'utf8')).toBe('mine');
++
++    // a disappears from the manifest → removed (it is still ours); b is the member's now and is left alone
++    const v3 = new Map<string, Buffer>();
++    const third = await applyFiles(localPath, v3, second.journal);
++    expect(third.results.map((r) => `${r.name}:${r.action}`)).toEqual(['a:removed']);
++    expect(fs.existsSync(path.join(localPath, 'rules/a.md'))).toBe(false);
++    expect(fs.readFileSync(path.join(localPath, 'rules/b.md'), 'utf8')).toBe('mine');
++  });
++
++  it('classifies rendered paths back to kinds', () => {
++    expect(classify('skills/deploy/SKILL.md')).toEqual({ kind: 'skill', name: 'deploy' });
++    expect(classify('claudemd/common/x.md')).toEqual({ kind: 'claudemd', name: 'x' });
++    expect(classify('hooks/scripts/lint.sh')).toEqual({ kind: 'hook', name: 'scripts/lint.sh' });
++  });
++});
++
++describe('deviceLogin', () => {
++  it('polls until approved and stores credentials 0600', async () => {
++    let polls = 0;
++    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
++      if (url.endsWith('/v1/auth/device/start')) {
++        return new Response(JSON.stringify({ device_code: 'dc', user_code: 'AB12-CD34', verification_url: 'https://s/activate', interval: 1 }), { status: 200 });
++      }
++      if (url.endsWith('/v1/auth/device/poll')) {
++        polls++;
++        if (polls < 2) return new Response(JSON.stringify({ error: { code: 'AUTHORIZATION_PENDING', message: 'wait' } }), { status: 428 });
++        return new Response(JSON.stringify({ access_token: 'at', refresh_token: 'rt', machine_id: 'm1', enrollment_project_ids: ['p1'] }), { status: 200 });
++      }
++      throw new Error(`unexpected ${init?.method} ${url}`);
++    });
++    vi.stubGlobal('fetch', fetchMock);
++    const shown: string[] = [];
++    const result = await deviceLogin('https://s', { onCode: (c) => shown.push(c), sleep: async () => {} });
++    expect(shown).toEqual(['AB12-CD34']);
++    expect(result.enrollmentProjectIds).toEqual(['p1']);
++    const credsPath = path.join(tmpHome, '.teamai', 'server-credentials.json');
++    expect(JSON.parse(fs.readFileSync(credsPath, 'utf8')).accessToken).toBe('at');
++    if (process.platform !== 'win32') {
++      expect(fs.statSync(credsPath).mode & 0o777).toBe(0o600);
++    }
++  });
++});
++
++describe('syncServerRepo', () => {
++  it('materializes a snapshot, reports results, then returns unchanged on 304', async () => {
++    const { snap, store } = snapshot();
++    await saveCredentials({ server: 'https://s', accessToken: 'at', refreshToken: 'rt', machineId: 'm1' });
++    const reports: unknown[] = [];
++    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
++      const headers = init?.headers as Record<string, string>;
++      expect(headers.Authorization).toBe('Bearer at');
++      expect(headers['X-Client-Version']).toBeTruthy();
++      if (url.endsWith('/v1/bindings/b1/snapshot')) {
++        if (headers['If-None-Match'] === '"sha256:rev1"') return new Response(null, { status: 304 });
++        return new Response(JSON.stringify(snap), { status: 200, headers: { etag: '"sha256:rev1"' } });
++      }
++      if (url.includes('/v1/blobs/')) {
++        const sha = url.slice(url.indexOf('/v1/blobs/') + '/v1/blobs/'.length);
++        const b = store.get(sha);
++        return b ? new Response(new Uint8Array(b), { status: 200 }) : new Response('', { status: 404 });
++      }
++      if (url.endsWith('/v1/bindings/b1/sync-results')) {
++        reports.push(JSON.parse(init!.body as string));
++        return new Response('{}', { status: 200 });
++      }
++      throw new Error(`unexpected ${url}`);
++    });
++    vi.stubGlobal('fetch', fetchMock);
++    const localPath = path.join(tmpHome, 'team-repo');
++    const config: LocalConfig = { repo: { localPath, remote: 'https://s', kind: 'server', url: 'https://s', bindingId: 'b1' }, username: 'u', scope: 'user', additionalRoles: [] };
++
++    const first = await syncServerRepo(config);
++    expect(first.changed).toBe(true);
++    expect(first.conflicts).toEqual([{ kind: 'rule', name: 'clash' }]);
++    expect(fs.readFileSync(path.join(localPath, 'skills/deploy/SKILL.md'), 'utf8')).toContain('deploy');
++    expect((await loadJournal(localPath)).revision).toBe('sha256:rev1');
++    expect(reports).toHaveLength(1);
++    expect((reports[0] as { applied_revision: string }).applied_revision).toBe('sha256:rev1');
++
++    const second = await syncServerRepo(config);
++    expect(second.changed).toBe(false);
++    // blob cache: second full sync must not re-download
++    const blobCalls = fetchMock.mock.calls.filter(([u]) => String(u).includes('/v1/blobs/')).length;
++    await syncServerRepo(config, { force: true });
++    expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('/v1/blobs/')).length).toBe(blobCalls);
++
++    // purge removes only our untouched files
++    fs.writeFileSync(path.join(localPath, 'rules/naming.md'), 'edited');
++    const n = await purgeOwned(localPath);
++    expect(n).toBeGreaterThan(5);
++    expect(fs.existsSync(path.join(localPath, 'rules/naming.md'))).toBe(true);
++    expect(fs.existsSync(path.join(localPath, 'skills/deploy'))).toBe(false);
++  });
++});
+diff --git a/src/__tests__/server-write.test.ts b/src/__tests__/server-write.test.ts
+new file mode 100644
+index 0000000..7f057ec
+--- /dev/null
++++ b/src/__tests__/server-write.test.ts
+@@ -0,0 +1,105 @@
++import fs from 'node:fs';
++import os from 'node:os';
++import path from 'node:path';
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++
++let tmpHome: string;
++vi.mock('../utils/home.js', () => ({ getUserHome: () => tmpHome }));
++
++import { contributeLearning, nextSeq, reportEvents, saveCredentials, submitChangeset, uploadBlob, type ChangeOp } from '../server-repo.js';
++
++const creds = { server: 'https://s', accessToken: 'at', refreshToken: 'rt', machineId: 'm1' };
++
++beforeEach(async () => {
++  tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'teamai-server-write-'));
++  await saveCredentials(creds);
++});
++afterEach(() => {
++  vi.unstubAllGlobals();
++  fs.rmSync(tmpHome, { recursive: true, force: true });
++});
++
++function json(body: unknown, status = 200, headers: Record<string, string> = {}) {
++  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
++}
++
++describe('uploadBlob', () => {
++  it('sends raw bytes with the sha256 header', async () => {
++    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
++      expect(url).toBe('https://s/v1/blobs');
++      const h = init!.headers as Record<string, string>;
++      expect(h['X-Sha256']).toMatch(/^sha256:[0-9a-f]{64}$/);
++      expect(h['Content-Type']).toBe('application/octet-stream');
++      return json({ sha256: h['X-Sha256'], size: 5 }, 201);
++    });
++    vi.stubGlobal('fetch', fetchMock);
++    const ref = await uploadBlob(creds, Buffer.from('hello'));
++    expect(ref.size).toBe(5);
++    expect(ref.sha256).toBe('sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824');
++  });
++});
++
++describe('submitChangeset', () => {
++  const op: ChangeOp = { op: 'put', level: 'project', project_id: 'p1', kind: 'rule', name: 'naming', files: [{ path: 'RULE.md', sha256: 'sha256:x', size: 1 }] };
++
++  it('creates and submits a new change set when none is open', async () => {
++    const calls: string[] = [];
++    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
++      calls.push(`${init?.method} ${url}`);
++      if (url.endsWith('/v1/change-sets?view=mine')) return json({ items: [] });
++      if (url.endsWith('/v1/change-sets')) return json({ id: 'cs1', state: 'draft', title: 'put rule/naming', etag: 'e1', ops: [op] }, 201);
++      if (url.endsWith('/v1/change-sets/cs1/submit')) return json({ id: 'cs1', state: 'in_review', title: 'put rule/naming', etag: 'e2', ops: [op] });
++      throw new Error(`unexpected ${url}`);
++    }));
++    const cs = await submitChangeset(creds, { title: 'put rule/naming', ops: [op] });
++    expect(cs.state).toBe('in_review');
++    expect(calls).toEqual(['GET https://s/v1/change-sets?view=mine', 'POST https://s/v1/change-sets', 'POST https://s/v1/change-sets/cs1/submit']);
++  });
++
++  it('folds the operation into my open change set that already touches the resource', async () => {
++    const other: ChangeOp = { op: 'put', level: 'project', project_id: 'p1', kind: 'skill', name: 'deploy' };
++    const stale: ChangeOp = { ...op, files: [{ path: 'RULE.md', sha256: 'sha256:old', size: 1 }] };
++    let patched: { ops: ChangeOp[]; title: string } | null = null;
++    let ifMatch = '';
++    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
++      if (url.endsWith('/v1/change-sets?view=mine')) return json({ items: [{ id: 'cs9', state: 'in_review', title: 'earlier', etag: 'e9', ops: [stale, other] }] });
++      if (url.endsWith('/v1/change-sets/cs9') && init?.method === 'GET') return json({ id: 'cs9', state: 'in_review', title: 'earlier', etag: 'e9', ops: [stale, other] });
++      if (url.endsWith('/v1/change-sets/cs9') && init?.method === 'PATCH') {
++        ifMatch = (init.headers as Record<string, string>)['If-Match'];
++        patched = JSON.parse(init.body as string);
++        return json({ id: 'cs9', state: 'draft', title: 'earlier', etag: 'e10', ops: patched!.ops });
++      }
++      if (url.endsWith('/v1/change-sets/cs9/submit')) return json({ id: 'cs9', state: 'in_review', title: 'earlier', etag: 'e11', ops: patched!.ops });
++      throw new Error(`unexpected ${init?.method} ${url}`);
++    }));
++    const cs = await submitChangeset(creds, { title: 'put rule/naming', ops: [op] });
++    expect(cs.id).toBe('cs9');
++    expect(ifMatch).toBe('"e9"');
++    expect(patched!.title).toBe('earlier');
++    // the stale copy of naming is replaced, the unrelated skill is kept
++    expect(patched!.ops.map((o) => `${o.kind}/${o.name}:${o.files?.[0]?.sha256 ?? ''}`).sort()).toEqual(['rule/naming:sha256:x', 'skill/deploy:']);
++  });
++});
++
++describe('contributeLearning + reportEvents', () => {
++  it('posts learnings and events with a monotonic per-machine sequence', async () => {
++    const bodies: Record<string, unknown>[] = [];
++    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
++      bodies.push({ url, ...JSON.parse(init!.body as string) });
++      if (url.endsWith('/v1/learnings')) return json({ id: 'cs2', state: 'published', title: 't', etag: 'e', ops: [{ op: 'put', level: 'project', kind: 'learning', name: 'l-2026' }] }, 201);
++      if (url.endsWith('/v1/reports/events')) return json({ accepted: ['a', 'b'], max_seq: 2 });
++      throw new Error(`unexpected ${url}`);
++    }));
++    const cs = await contributeLearning(creds, { title: 't', content: '# t\nbody', projectId: 'p1' });
++    expect(cs.ops[0].name).toBe('l-2026');
++    const first = await nextSeq(2);
++    const again = await nextSeq(1);
++    expect([first, again]).toEqual([1, 3]);
++    const ack = await reportEvents(creds, [
++      { event_id: 'a', seq: 1, type: 'skill_usage', occurred_at: new Date().toISOString(), payload: { skill: 'x', count: 1 } },
++      { event_id: 'b', seq: 2, type: 'usage_daily', occurred_at: new Date().toISOString(), payload: { day: '2026-09-11' } },
++    ]);
++    expect(ack.accepted).toEqual(['a', 'b']);
++    expect((bodies[1] as { events: unknown[] }).events).toHaveLength(2);
++  });
++});
+diff --git a/src/contribute.ts b/src/contribute.ts
+index 6c6367a..1ece239 100644
+--- a/src/contribute.ts
++++ b/src/contribute.ts
+@@ -177,6 +177,13 @@ export async function contribute(
+     return;
+   }
+ 
++  // Management backend: one call, published directly (or reviewed, per org policy).
++  if (localConfig.repo.kind === 'server') {
++    const { contributeServer } = await import('./server-write.js');
++    await contributeServer(localConfig, content, { title: options.title, sessionId: options.sessionId || process.env.CLAUDE_SESSION_ID || '' });
++    return;
++  }
++
+   // Single-repo mode: learnings are knowledge on main → contribute via a PR from
+   // an isolated worktree (never the active tree / direct push to main).
+   if (localConfig.repo.kind === 'self') {
+diff --git a/src/hook-handlers.ts b/src/hook-handlers.ts
+index 5f37a0c..ab50eb7 100644
+--- a/src/hook-handlers.ts
++++ b/src/hook-handlers.ts
+@@ -323,6 +323,15 @@ const votesSyncHandler: HookHandler = {
+         } catch {
+           // Push failed — will retry next session
+         }
++      } else if (localConfig.repo.kind === 'server') {
++        // Management backend: votes are report events. Keep the pending deltas
++        // local and send them now; whatever fails is retried by the next pull.
++        try {
++          const { reportToServer } = await import('./server-write.js');
++          await reportToServer(localConfig);
++        } catch {
++          // Offline — the deltas stay in the local vote file
++        }
+       } else {
+         await syncVotesToTeam(localConfig.repo.localPath, localConfig.username, votesDir).catch(() => {
+           // Push failed — will retry next session
+diff --git a/src/index.ts b/src/index.ts
+index 6432abf..29e82f2 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -53,6 +53,8 @@ program
+   .argument('[repo]', 'Team repo (owner/repo or full URL). Pass "." for single-repo mode (the current git repo is the team repo).')
+   .option('--repo <repo>', 'Team repo (alias of the positional argument)')
+   .option('--http <url>', 'Git-free HTTP team repo (read-only consumer; only needs an API key)')
++  .option('--server <url>', 'Git-free team repo served by the TeamAI management backend: logs in with a browser code, binds this directory to your projects, syncs. No git needed.')
++  .option('--code <code>', 'One-time enrollment code from your admin (with --server): pre-selects the projects and skips the project picker')
+   .option('--self', 'Single-repo mode: the current git repo is the team repo (equivalent to `teamai init .`). Knowledge lives on main under .teamai/; reports go to the teamai-reports orphan branch.')
+   .option('--token <key>', 'API key for HTTP team repo / status reporting (stored 0600, never committed). Also reads TEAMAI_API_TOKEN.')
+   .option('--scope <scope>', 'Install scope: project (default, <cwd>/.teamai + <cwd>/.claude) or user (~/.teamai + ~/.claude)')
+@@ -78,7 +80,8 @@ program
+   .option('--all', 'Push all without confirmation')
+   .option('--skill <path>', 'Push a specific skill by path (e.g., ~/.claude/skills/hai/my-skill or skills/hai_dev/my-skill)')
+   .option('--role <id>', 'Target role namespace for pushed project skills')
+-  .option('--project <id>', 'Target a project: push skills into the project\'s skills namespace (from manifest/projects.yaml)')
++  .option('--project <id>', 'Target a project: push skills into the project\'s skills namespace (from manifest/projects.yaml); with a team server, the project slug new resources land in')
++  .option('--fast-track', 'Team server only: publish immediately when you have release permission (skips review)')
+   .action(async (cmdOpts) => {
+     const globalOpts = program.opts() as GlobalOptions;
+     const { push } = await import('./push.js');
+diff --git a/src/init.ts b/src/init.ts
+index bb3b11b..3127a79 100644
+--- a/src/init.ts
++++ b/src/init.ts
+@@ -430,6 +430,225 @@ export async function initHttp(
+   closePrompt();
+ }
+ 
++/**
++ * Git-free onboarding against the TeamAI management backend (issue #341).
++ *
++ * The member never sees a repo URL, credentials, branches or MRs:
++ *   1. device-flow login — a short code approved in the browser, or an admin's
++ *      one-time enrollment code that also pre-selects the projects;
++ *   2. pick the projects this directory should follow (skipped with --code /
++ *      --project, or when there is exactly one);
++ *   3. bind the workspace, materialize the snapshot, save config, inject hooks,
++ *      run the first pull.
++ */
++export async function initServer(
++  url: string,
++  options: GlobalOptions & { scope?: string; project?: string; agent?: string | string[]; force?: boolean; code?: string; inheritUserScope?: boolean },
++): Promise<void> {
++  const server = url.trim().replace(/\/+$/, '');
++  const {
++    fetchCapabilities, deviceLogin, loadCredentials, listProjects, createBinding, deleteBinding, syncServerRepo,
++  } = await import('./server-repo.js');
++
++  log.info('Initializing teamai (team server, no git needed)...');
++
++  // Step 0: scope — same rules as every other init (default project)
++  let scope: Scope;
++  let projectRoot: string | undefined;
++  let explicit: boolean;
++  let fallbackReason: string | undefined;
++  try {
++    ({ scope, projectRoot, explicit, fallbackReason } = resolveInitScope(options.scope, process.cwd(), getUserHome()));
++  } catch (e) {
++    log.error((e as Error).message);
++    process.exit(1);
++    return;
++  }
++  const existingLocalConfig = await loadLocalConfigForScope(scope, projectRoot);
++  let inheritUserScope: boolean | undefined;
++  try {
++    inheritUserScope = resolveInheritUserScope(scope, options.inheritUserScope, existingLocalConfig?.inheritUserScope);
++  } catch (e) {
++    log.error((e as Error).message);
++    process.exit(1);
++    return;
++  }
++  if (fallbackReason) log.warn(fallbackReason);
++  const teamaiHome = scope === 'project' && projectRoot
++    ? (existingLocalConfig?.dataHome ?? await resolveProjectDataHome(projectRoot))
++    : getTeamaiHome(scope, projectRoot);
++  printScopeSummary(scope, projectRoot, explicit);
++
++  const existingConfigPath = path.join(teamaiHome, 'config.yaml');
++  if (await pathExists(existingConfigPath) && !options.force) {
++    const confirmed = await askConfirmation(`teamai already initialized at ${existingConfigPath}. Overwrite? [y/N] `);
++    if (!confirmed) {
++      log.info('Aborted. Existing config is unchanged.');
++      return;
++    }
++  }
++
++  // Step 1: reachability + version handshake before asking the member to do anything
++  try {
++    await fetchCapabilities(server);
++  } catch (e) {
++    log.error(`Cannot reach team server ${server}: ${(e as Error).message}`);
++    process.exit(1);
++    return;
++  }
++
++  // Step 2: login — reuse a valid device login for this server, else device flow
++  let creds = await loadCredentials();
++  let enrolledProjectIds: string[] = [];
++  if (creds && creds.server === server && !options.code) {
++    log.info('Using the existing login for this machine.');
++  } else {
++    const loginSpin = spinner('Waiting for approval in the browser...');
++    try {
++      const result = await deviceLogin(server, {
++        enrollmentCode: options.code?.trim() || undefined,
++        onCode: (code, verifyUrl) => {
++          log.info(`Open ${verifyUrl} in your browser and enter this code: ${code}`);
++          loginSpin.start();
++        },
++      });
++      creds = result.credentials;
++      enrolledProjectIds = result.enrollmentProjectIds;
++      loginSpin.succeed('Logged in.');
++    } catch (e) {
++      loginSpin.fail(`Login failed: ${(e as Error).message}`);
++      process.exit(1);
++      return;
++    }
++  }
++
++  // Step 3: projects — enrollment code > --project slugs > single project > picker
++  let projectIds: string[] = enrolledProjectIds;
++  if (projectIds.length === 0) {
++    const projects = await listProjects(creds!);
++    if (projects.length === 0) {
++      log.error('You are not a member of any project yet. Ask an admin for an enrollment code or to add you to a project.');
++      process.exit(1);
++      return;
++    }
++    if (options.project) {
++      const wanted = options.project.split(',').map((x) => x.trim()).filter(Boolean);
++      for (const slug of wanted) {
++        const p = projects.find((x) => x.slug === slug);
++        if (!p) {
++          log.error(`Unknown project "${slug}". Your projects: ${projects.map((x) => x.slug).join(', ')}`);
++          process.exit(1);
++          return;
++        }
++        projectIds.push(p.id);
++      }
++    } else if (projects.length === 1) {
++      projectIds = [projects[0].id];
++      log.info(`Project: ${projects[0].slug} (${projects[0].name})`);
++    } else {
++      log.info('Your projects:');
++      projects.forEach((p, i) => log.info(`  ${i + 1}. ${p.slug}  ${p.name}`));
++      const picked = await askSelection('Select project(s) for this directory (e.g. 1 or 1,3): ', projects.length, false);
++      if (!picked || picked.length === 0) {
++        log.info('Aborted: no project selected.');
++        return;
++      }
++      projectIds = picked.map((i) => projects[i].id);
++    }
++  }
++
++  // Step 4: bind this workspace (replacing a previous binding of the same directory)
++  const workspaceDir = scope === 'project' && projectRoot ? projectRoot : getUserHome();
++  if (existingLocalConfig?.repo.kind === 'server' && existingLocalConfig.repo.bindingId) {
++    try { await deleteBinding(creds!, existingLocalConfig.repo.bindingId); } catch { /* best-effort */ }
++  }
++  let bindingId: string;
++  try {
++    bindingId = await createBinding(creds!, workspaceDir, projectIds);
++  } catch (e) {
++    log.error(`Binding failed: ${(e as Error).message}`);
++    process.exit(1);
++    return;
++  }
++
++  // Step 5: local config (kind: server). Tokens live in the credentials file, never here.
++  const localPath = expandHome(path.join(teamaiHome, 'team-repo'));
++  await ensureDir(localPath);
++  const localConfig: LocalConfig = {
++    repo: { localPath, remote: server, kind: 'server', url: server, bindingId },
++    username: existingLocalConfig?.username ?? 'server-member',
++    scope,
++    projectRoot,
++    additionalRoles: [],
++    ...(scope === 'project' ? { dataHome: teamaiHome } : {}),
++    ...(inheritUserScope !== undefined ? { inheritUserScope } : {}),
++  };
++  // Which AI tools to set up: --agent, else the tools already installed under
++  // HOME, else Claude Code (same picker as single-repo mode). Their resource dirs
++  // are created below so the deploy step treats them as installed.
++  const requestedAgents = await promptForSelfModeAgents(options);
++  const prev = existingLocalConfig?.enabledAgents ?? [];
++  localConfig.enabledAgents = [...new Set([...prev, ...requestedAgents])];
++  localConfig.disabledAgents = (existingLocalConfig?.disabledAgents ?? []).filter((t) => !requestedAgents.includes(t));
++
++  // Step 6: first materialization, so teamai.yaml exists before hooks are reconciled
++  const syncSpin = spinner('Syncing team resources...').start();
++  try {
++    const outcome = await syncServerRepo(localConfig, { force: true });
++    const n = outcome.results.filter((r) => r.action === 'installed' || r.action === 'updated').length;
++    syncSpin.succeed(`Synced ${n} file(s) at revision ${outcome.revision.slice(0, 19)}`);
++  } catch (e) {
++    syncSpin.fail(`Sync failed: ${(e as Error).message}`);
++    process.exit(1);
++    return;
++  }
++  const teamConfig = await loadTeamConfig(localPath);
++  if (!teamConfig) {
++    log.error('The server snapshot did not produce a valid teamai.yaml.');
++    process.exit(1);
++    return;
++  }
++  try {
++    const { seedSelfModeToolDirs } = await import('./known-agents.js');
++    const seeded = await seedSelfModeToolDirs(localConfig, teamConfig);
++    if (seeded.length > 0) log.info(`AI tools: ${seeded.join(', ')}`);
++  } catch (e) {
++    log.debug(`tool dir seeding skipped: ${(e as Error).message}`);
++  }
++
++  // Use the login identity for the username so learnings/votes carry a real author.
++  try {
++    const { apiCall } = await import('./server-repo.js');
++    const me = await apiCall<{ account: { email: string; name: string } }>(creds!, 'GET', '/v1/me');
++    localConfig.username = me.data.account.email || localConfig.username;
++  } catch { /* keep default */ }
++
++  await ensureDir(teamaiHome);
++  if (scope === 'project') {
++    await saveLocalConfigForScope(localConfig, scope, projectRoot);
++  } else {
++    await ensureDir(getTeamaiHomeDir());
++    await saveLocalConfig(localConfig);
++  }
++  log.success(`Local config saved to ${teamaiHome}/config.yaml`);
++
++  try {
++    const state = await loadStateForScope(localConfig);
++    state.lastPullRev = null;
++    await saveStateForScope(state, localConfig);
++  } catch { /* state may not exist yet */ }
++
++  // Step 7: hooks, then the regular pull deploys everything into the AI tools
++  const filterAgents = requestedAgents.length > 0 ? requestedAgents : undefined;
++  await reconcileTeamHooksForConfig(teamConfig, localConfig, { filterAgents });
++
++  const { pull } = await import('./pull.js');
++  await pull({ ...options, force: true } as GlobalOptions);
++
++  log.success('teamai initialized against the team server. Resources auto-sync on each session start.');
++  closePrompt();
++}
++
+ /**
+  * Build the .teamai/.gitignore for single-repo mode. Unlike the standalone
+  * project-scope gitignore, knowledge (skills/rules/docs/learnings) is COMMITTED
+@@ -985,6 +1204,8 @@ export async function init(options: GlobalOptions & {
+   agent?: string | string[];
+   force?: boolean;
+   http?: string;
++  server?: string;
++  code?: string;
+   token?: string;
+   inheritUserScope?: boolean;
+   self?: boolean;
+@@ -992,6 +1213,9 @@ export async function init(options: GlobalOptions & {
+   if (options.http) {
+     return initHttp(options.http, options);
+   }
++  if (options.server) {
++    return initServer(options.server, options);
++  }
+   // Single-repo mode: `teamai init .` or `teamai init --self`. The current git
+   // repo IS the team repo; knowledge lives on main under .teamai/, reports go to
+   // the teamai-reports orphan branch. No separate team repo is cloned.
+diff --git a/src/pull.ts b/src/pull.ts
+index 73cc9dd..8b9f82d 100644
+--- a/src/pull.ts
++++ b/src/pull.ts
+@@ -75,6 +75,25 @@ async function refreshTeamRepo(
+     return { label: 'HTTP (report/sync delivery)', version: null, reportingOnly: true };
+   }
+ 
++  if (localConfig.repo.kind === 'server') {
++    // Management backend (issue #341): pull the binding's snapshot and materialize
++    // it into localPath. 304 means the tree is already at this revision. The
++    // revision doubles as the incremental-sync cache key.
++    const { syncServerRepo } = await import('./server-repo.js');
++    const outcome = await syncServerRepo(localConfig);
++    for (const c of outcome.conflicts) {
++      log.warn(`[server] ${c.kind}/${c.name}: bound projects ship different versions — kept the local copy`);
++    }
++    const skipped = outcome.results.filter((r) => r.action === 'conflict_skipped');
++    for (const r of skipped) {
++      log.warn(`[server] ${r.kind}/${r.name}: modified locally, not overwritten`);
++    }
++    const label = outcome.changed
++      ? `team server (revision ${outcome.revision.slice(0, 19)})`
++      : `team server (unchanged at ${outcome.revision.slice(0, 19)})`;
++    return { label, version: outcome.revision, reportingOnly: false };
++  }
++
+   if (localConfig.repo.kind === 'self') {
+     // Single-repo mode: knowledge lives under <business-repo>/.teamai on main and
+     // arrives with the business repo's own `git clone`/`git pull`. teamai must NOT
+@@ -1549,7 +1568,7 @@ export async function pull(options: GlobalOptions): Promise<void> {
+       const { reportUsageToTeam } = await import('./team-push.js');
+       const { truncateUsageAfterReport, readUsageEvents } = await import('./usage-tracker.js');
+       const targets: Array<{ repoPath: string; username: string; opts: { skipTruncate: true; projectRoot?: string; excludeProjectRoots?: string[]; selfConfig?: LocalConfig } }> = [];
+-      if (reconcileProject && reconcileProject.repo.kind !== 'http') {
++      if (reconcileProject && reconcileProject.repo.kind !== 'http' && reconcileProject.repo.kind !== 'server') {
+         targets.push({
+           repoPath: reconcileProject.repo.localPath,
+           username: reconcileProject.username,
+@@ -1561,7 +1580,7 @@ export async function pull(options: GlobalOptions): Promise<void> {
+           },
+         });
+       }
+-      if (reconcileUser && reconcileUser.repo.kind !== 'http') {
++      if (reconcileUser && reconcileUser.repo.kind !== 'http' && reconcileUser.repo.kind !== 'server') {
+         targets.push({
+           repoPath: reconcileUser.repo.localPath,
+           username: reconcileUser.username,
+@@ -1575,6 +1594,22 @@ export async function pull(options: GlobalOptions): Promise<void> {
+         });
+       }
+ 
++      // Management backend scopes report over HTTP instead of a git commit.
++      const serverTargets = [reconcileProject, reconcileUser].filter((c): c is LocalConfig => !!c && c.repo.kind === 'server');
++      let serverReported = false;
++      for (const c of serverTargets) {
++        try {
++          const { reportToServer } = await import('./server-write.js');
++          const r = await reportToServer(c, c.scope === 'project'
++            ? { projectRoot: c.projectRoot }
++            : { excludeProjectRoots: projectConfig?.projectRoot ? [projectConfig.projectRoot] : [] });
++          if (r.sent > 0) log.debug(`Reported ${r.sent} event(s) to the team server`);
++          serverReported = true;
++        } catch (e) {
++          log.debug(`Server report skipped: ${(e as Error).message}`);
++        }
++      }
++
+       const eventCount = (await readUsageEvents()).length;
+       for (const t of targets) {
+         try {
+@@ -1583,7 +1618,7 @@ export async function pull(options: GlobalOptions): Promise<void> {
+           log.error(`Auto-report to ${t.repoPath} skipped: ${(e as Error).message}`);
+         }
+       }
+-      if (eventCount > 0 && targets.length > 0) {
++      if (eventCount > 0 && (targets.length > 0 || serverReported)) {
+         await truncateUsageAfterReport(eventCount);
+       }
+     } catch (e) {
+diff --git a/src/push.ts b/src/push.ts
+index 42ac69b..e1d99d6 100644
+--- a/src/push.ts
++++ b/src/push.ts
+@@ -278,6 +278,13 @@ export async function push(options: GlobalOptions & { all?: boolean; role?: stri
+   const { localConfig, teamConfig } = await autoDetectInit();
+   assertNotReadOnly(localConfig, 'teamai push');
+ 
++  // Management backend: resources become a change set (no branch, no MR).
++  if (localConfig.repo.kind === 'server') {
++    const { pushServer } = await import('./server-write.js');
++    await pushServer(localConfig, teamConfig, options as typeof options & { skill?: string; fastTrack?: boolean });
++    return;
++  }
++
+   // --project is a destination override expressed as a logical project: resolve
+   // it to the project's skills namespace (from manifest/projects.yaml) and reuse
+   // the --role landing logic below. Deliberately manifest-resolved, not the raw
+diff --git a/src/remove.ts b/src/remove.ts
+index 8248877..f4a8e39 100644
+--- a/src/remove.ts
++++ b/src/remove.ts
+@@ -28,6 +28,13 @@ export async function remove(
+   const { localConfig, teamConfig } = await autoDetectInit();
+   assertNotReadOnly(localConfig, 'teamai remove');
+ 
++  // Management backend: a change set with delete operations, reviewed in the console.
++  if (localConfig.repo.kind === 'server') {
++    const { removeServer } = await import('./server-write.js');
++    await removeServer(localConfig, type, names, options);
++    return;
++  }
++
+   // Single-repo mode: run the removal PR in an isolated knowledge worktree so the
+   // branch/commit never touches the user's active tree.
+   if (localConfig.repo.kind === 'self') {
+diff --git a/src/server-format.ts b/src/server-format.ts
+new file mode 100644
+index 0000000..968af6c
+--- /dev/null
++++ b/src/server-format.ts
+@@ -0,0 +1,234 @@
++/**
++ * Render a management-backend snapshot into the team-repo layout that every
++ * ResourceHandler already reads (`<localPath>/skills/<name>/`, `rules/<name>.md`,
++ * `agents/<name>.yaml`, `env/env.yaml`, `hooks/hooks.yaml`, `mcp/mcp.yaml`,
++ * `claudemd/<ns>/<name>.md`, `culture.md`, `learnings/<name>.md`, `teamai.yaml`,
++ * `tags.yaml`).
++ *
++ * The server has already resolved org/team/project levels and permission groups
++ * for this binding, so the layout is flat: no role/project namespaces to select.
++ * This is a port of the reference renderer in the backend (internal/teamaifmt);
++ * the two must produce byte-identical trees for the same snapshot.
++ */
++
++export interface SnapshotFile {
++  path: string;
++  sha256: string;
++  size: number;
++}
++
++export interface SnapshotEntry {
++  kind: string;
++  name: string;
++  namespace?: string;
++  level?: string;
++  version?: number;
++  sha256?: string;
++  tags?: string[];
++  files?: SnapshotFile[];
++  status: 'ok' | 'conflict' | string;
++  conflict?: { owners?: string[]; versions?: number[] };
++}
++
++/** Merged sharing policy as the server sends it (field names match the backend's JSON). */
++export interface SnapshotPolicy {
++  enforced_rules?: string[];
++  hooks_auto_apply?: boolean;
++  hooks_require_team_scripts?: boolean;
++  mcp_auto_apply?: boolean;
++  mcp_allowed_commands?: string[];
++  mcp_allowed_hosts?: string[];
++  recall_enabled?: boolean;
++  contribute_hint?: boolean;
++  co_author?: boolean;
++}
++
++export interface ServerSnapshot {
++  revision: string;
++  generated_at?: string;
++  org: { id: string; slug: string; name: string };
++  projects: Array<{ id: string; slug: string; name: string; revision?: string }>;
++  policy: SnapshotPolicy;
++  grants?: Array<{ group_key: string; name: string }>;
++  culture?: SnapshotEntry;
++  resources: SnapshotEntry[];
++  limits?: { max_blob_bytes?: number; max_snapshot_bytes?: number; max_entries?: number };
++}
++
++export type BlobReader = (sha256: string) => Promise<Buffer>;
++
++/** Entry file per kind — mirrors resources.Kind.EntryFile on the server. */
++export const ENTRY_FILE: Record<string, string> = {
++  skill: 'SKILL.md',
++  rule: 'RULE.md',
++  doc: 'DOC.md',
++  agent: 'AGENT.yaml',
++  hook: 'HOOK.yaml',
++  mcp: 'MCP.yaml',
++  env: 'ENV.yaml',
++  claudemd: 'CLAUDEMD.md',
++  culture: 'CULTURE.md',
++  policy: 'POLICY.yaml',
++  learning: 'LEARNING.md',
++};
++
++async function entryContent(e: SnapshotEntry, read: BlobReader): Promise<Buffer> {
++  const want = ENTRY_FILE[e.kind];
++  const f = (e.files ?? []).find((x) => x.path === want);
++  if (!f) throw new Error(`${e.kind}/${e.name}: missing entry file ${want}`);
++  return read(f.sha256);
++}
++
++/** YAML double-quoted scalar; the backend uses exactly this escaping. */
++export function yamlStr(s: string): string {
++  return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
++}
++
++function yamlList(items: string[] | undefined): string {
++  if (!items || items.length === 0) return '[]';
++  return `[${items.map(yamlStr).join(', ')}]`;
++}
++
++function yamlBool(b: boolean | undefined): string {
++  return b ? 'true' : 'false';
++}
++
++function nonComment(line: string): boolean {
++  const t = line.trim();
++  return t !== '' && !t.startsWith('#');
++}
++
++/** ENV.yaml (value / description) → one item of env.yaml. */
++function envBlock(key: string, content: string): string {
++  const lines = content.split('\n').map((l) => l.replace(/\r$/, ''));
++  const secret = lines.some((l) => /^secret:\s*true\s*$/.test(l));
++  let out = `  - key: ${key}\n`;
++  if (secret) {
++    // Secret variables have no value on the server; the member sets it locally.
++    out += '    value: ""\n    # secret: 值不在服务端，需在本机设置\n';
++  }
++  for (const line of lines) {
++    if (!nonComment(line) || line.startsWith('secret:')) continue;
++    out += `    ${line}\n`;
++  }
++  return out;
++}
++
++/** A top-level YAML mapping → one list item. */
++function indentItem(content: string): string {
++  let out = '';
++  let first = true;
++  for (const raw of content.split('\n')) {
++    const line = raw.replace(/\r$/, '');
++    if (!nonComment(line)) continue;
++    out += first ? `  - ${line}\n` : `    ${line}\n`;
++    first = false;
++  }
++  return out;
++}
++
++function teamaiYaml(snap: ServerSnapshot, serverUrl: string): string {
++  const p = snap.policy ?? {};
++  return [
++    '# Generated by the teamai management backend on every sync. Do not edit.',
++    `team: ${yamlStr(snap.org.slug)}`,
++    `description: ${yamlStr(snap.org.name)}`,
++    `repo: ${yamlStr(serverUrl)}`,
++    'provider: git',
++    'mode: server',
++    'sharing:',
++    `  rules:\n    enforced: ${yamlList(p.enforced_rules)}`,
++    `  hooks:\n    autoApply: ${yamlBool(p.hooks_auto_apply)}\n    requireTeamScripts: ${yamlBool(p.hooks_require_team_scripts)}`,
++    `  mcp:\n    autoApply: ${yamlBool(p.mcp_auto_apply)}\n    allowedCommands: ${yamlList(p.mcp_allowed_commands)}\n    allowedHosts: ${yamlList(p.mcp_allowed_hosts)}`,
++    `  recall:\n    enabled: ${yamlBool(p.recall_enabled)}`,
++    `  contributeHint:\n    enabled: ${yamlBool(p.contribute_hint)}`,
++    `  coAuthor:\n    enabled: ${yamlBool(p.co_author)}`,
++    '',
++  ].join('\n');
++}
++
++function tagsYaml(snap: ServerSnapshot): string {
++  const skills: Record<string, string[]> = {};
++  const rules: Record<string, string[]> = {};
++  for (const e of snap.resources) {
++    if (!e.tags?.length || e.status !== 'ok') continue;
++    if (e.kind === 'skill') skills[e.name] = e.tags;
++    if (e.kind === 'rule') rules[e.name] = e.tags;
++  }
++  if (Object.keys(skills).length === 0 && Object.keys(rules).length === 0) return '';
++  let out = 'version: 1\n';
++  for (const [key, m] of [['skills', skills], ['rules', rules]] as const) {
++    const names = Object.keys(m).sort();
++    if (names.length === 0) continue;
++    out += `${key}:\n`;
++    for (const n of names) out += `  ${n}: ${yamlList(m[n])}\n`;
++  }
++  return out;
++}
++
++/**
++ * Render the snapshot to a map of relative path → content. Conflicting entries
++ * (two bound projects shipping different versions of the same name) are skipped;
++ * the caller keeps whatever it already has for them.
++ */
++export async function renderSnapshot(
++  snap: ServerSnapshot,
++  read: BlobReader,
++  serverUrl: string,
++): Promise<Map<string, Buffer>> {
++  const out = new Map<string, Buffer>();
++  const envVars: string[] = [];
++  const hooks: string[] = [];
++  const mcps: string[] = [];
++
++  for (const e of snap.resources) {
++    if (e.status !== 'ok') continue;
++    switch (e.kind) {
++      case 'skill':
++        for (const f of e.files ?? []) {
++          out.set(`skills/${e.name}/${f.path}`, await read(f.sha256));
++        }
++        break;
++      case 'rule':
++        out.set(`rules/${e.name}.md`, await entryContent(e, read));
++        break;
++      case 'doc':
++        out.set(`docs/${e.name}`, await entryContent(e, read));
++        break;
++      case 'agent':
++        out.set(`agents/${e.name}.yaml`, await entryContent(e, read));
++        break;
++      case 'claudemd':
++        out.set(`claudemd/${e.namespace || 'common'}/${e.name}.md`, await entryContent(e, read));
++        break;
++      case 'learning':
++        out.set(`learnings/${e.name}.md`, await entryContent(e, read));
++        break;
++      case 'env':
++        envVars.push(envBlock(e.name, (await entryContent(e, read)).toString('utf8')));
++        break;
++      case 'hook':
++        hooks.push(indentItem((await entryContent(e, read)).toString('utf8')));
++        for (const f of e.files ?? []) {
++          if (f.path.startsWith('scripts/')) out.set(`hooks/${f.path}`, await read(f.sha256));
++        }
++        break;
++      case 'mcp':
++        mcps.push(indentItem((await entryContent(e, read)).toString('utf8')));
++        break;
++      default:
++        // policy is folded into teamai.yaml; unknown kinds are ignored on purpose so
++        // an older CLI keeps working against a newer server.
++        break;
++    }
++  }
++
++  if (envVars.length) out.set('env/env.yaml', Buffer.from(`variables:\n${envVars.join('')}`));
++  if (hooks.length) out.set('hooks/hooks.yaml', Buffer.from(`hooks:\n${hooks.join('')}`));
++  if (mcps.length) out.set('mcp/mcp.yaml', Buffer.from(`servers:\n${mcps.join('')}`));
++  if (snap.culture) out.set('culture.md', await entryContent(snap.culture, read));
++  out.set('teamai.yaml', Buffer.from(teamaiYaml(snap, serverUrl)));
++  const tags = tagsYaml(snap);
++  if (tags) out.set('tags.yaml', Buffer.from(tags));
++  return out;
++}
+diff --git a/src/server-repo.ts b/src/server-repo.ts
+new file mode 100644
+index 0000000..f23df3b
+--- /dev/null
++++ b/src/server-repo.ts
+@@ -0,0 +1,580 @@
++/**
++ * Git-free team repo backed by the TeamAI management backend (issue #341).
++ *
++ * `repo.kind === 'server'`: the backend is the source of truth; this module logs
++ * the machine in with the OAuth device flow, binds the workspace to projects,
++ * pulls a full snapshot (content by sha256, 304 when unchanged) and materializes
++ * it into `localPath` in the same layout a git clone would have. Everything
++ * downstream (ResourceHandlers, hooks, recall) is unchanged.
++ *
++ * Local state:
++ *   ~/.teamai/server-credentials.json   access + refresh token, machine id (0600)
++ *   ~/.teamai/blobs/<sha256>            content-addressed cache
++ *   <localPath>/.server-journal.json    what we wrote, for conflict detection
++ *   <localPath>/.server-snapshot.json   last snapshot (used by push/contribute)
++ */
++
++import fs from 'node:fs';
++import path from 'node:path';
++import os from 'node:os';
++import { createHash } from 'node:crypto';
++import { createRequire } from 'node:module';
++import { ensureDir, pathExists, readJson, writeJsonAtomic } from './utils/fs.js';
++import { getUserHome } from './utils/home.js';
++import { log } from './utils/logger.js';
++import type { LocalConfig } from './types.js';
++import { renderSnapshot, type ServerSnapshot } from './server-format.js';
++
++const require = createRequire(import.meta.url);
++const { version: CLI_VERSION } = require('../package.json') as { version: string };
++
++export const JOURNAL_FILE = '.server-journal.json';
++export const SNAPSHOT_FILE = '.server-snapshot.json';
++
++export interface ServerCredentials {
++  server: string;
++  accessToken: string;
++  refreshToken: string;
++  machineId: string;
++}
++
++export interface Journal {
++  revision: string;
++  files: Record<string, string>; // relative path → sha256 hex
++}
++
++export interface ServerProject {
++  id: string;
++  slug: string;
++  name: string;
++  archived?: boolean;
++}
++
++export class ServerError extends Error {
++  constructor(public status: number, public code: string, message: string) {
++    super(`${status} ${code}: ${message}`);
++  }
++}
++
++// ── local state ──────────────────────────────────────────────
++
++export function getCredentialsPath(): string {
++  return path.join(getUserHome(), '.teamai', 'server-credentials.json');
++}
++
++function blobCacheDir(): string {
++  return path.join(getUserHome(), '.teamai', 'blobs');
++}
++
++export async function loadCredentials(): Promise<ServerCredentials | null> {
++  return readJson<ServerCredentials>(getCredentialsPath());
++}
++
++export async function saveCredentials(c: ServerCredentials): Promise<void> {
++  await ensureDir(path.dirname(getCredentialsPath()));
++  await fs.promises.writeFile(getCredentialsPath(), JSON.stringify(c, null, 2) + '\n', { mode: 0o600 });
++  await fs.promises.chmod(getCredentialsPath(), 0o600);
++}
++
++export async function clearCredentials(): Promise<void> {
++  try { await fs.promises.unlink(getCredentialsPath()); } catch { /* absent */ }
++}
++
++export function sha256Hex(data: Buffer | string): string {
++  return createHash('sha256').update(data).digest('hex');
++}
++
++/** Stable id of this workspace on this machine; never leaves the machine as a path. */
++export function workspaceId(dir: string): string {
++  return sha256Hex(dir).slice(0, 32);
++}
++
++function fingerprint(): string {
++  return sha256Hex(`${os.hostname()}|${getUserHome()}`).slice(0, 32);
++}
++
++// ── HTTP ─────────────────────────────────────────────────────
++
++async function readError(res: Response): Promise<ServerError> {
++  let code = 'HTTP_ERROR';
++  let message = res.statusText;
++  try {
++    const body = await res.json() as { error?: { code?: string; message?: string } };
++    code = body.error?.code ?? code;
++    message = body.error?.message ?? message;
++  } catch { /* not json */ }
++  return new ServerError(res.status, code, message);
++}
++
++export async function serverFetch(
++  server: string,
++  token: string | null,
++  method: string,
++  route: string,
++  body?: unknown,
++  headers: Record<string, string> = {},
++): Promise<Response> {
++  const h: Record<string, string> = { 'X-Client-Version': CLI_VERSION, ...headers };
++  if (token) h.Authorization = `Bearer ${token}`;
++  let payload: BodyInit | undefined;
++  if (body instanceof Buffer) {
++    payload = new Blob([new Uint8Array(body)]);
++    h['Content-Type'] = h['Content-Type'] ?? 'application/octet-stream';
++  } else if (body !== undefined) {
++    payload = JSON.stringify(body);
++    h['Content-Type'] = 'application/json';
++  }
++  return fetch(`${server}${route}`, { method, headers: h, body: payload });
++}
++
++async function refresh(creds: ServerCredentials): Promise<void> {
++  const res = await serverFetch(creds.server, null, 'POST', '/v1/auth/token', { refresh_token: creds.refreshToken });
++  if (!res.ok) throw await readError(res);
++  const tok = await res.json() as { access_token: string; refresh_token: string };
++  creds.accessToken = tok.access_token;
++  creds.refreshToken = tok.refresh_token;
++  await saveCredentials(creds);
++}
++
++/** Authenticated call with one transparent token refresh on 401. */
++export async function apiCall<T = unknown>(
++  creds: ServerCredentials,
++  method: string,
++  route: string,
++  body?: unknown,
++  headers: Record<string, string> = {},
++): Promise<{ status: number; data: T; etag: string | null }> {
++  let res = await serverFetch(creds.server, creds.accessToken, method, route, body, headers);
++  if (res.status === 401) {
++    await refresh(creds); // throws when the device was revoked → caller shows "re-login"
++    res = await serverFetch(creds.server, creds.accessToken, method, route, body, headers);
++  }
++  if (res.status === 304) return { status: 304, data: undefined as T, etag: res.headers.get('etag') };
++  if (!res.ok) throw await readError(res);
++  const text = await res.text();
++  return { status: res.status, data: (text ? JSON.parse(text) : undefined) as T, etag: res.headers.get('etag') };
++}
++
++// ── onboarding ───────────────────────────────────────────────
++
++export interface Capabilities {
++  version: string;
++  api_version?: string;
++  min_client_version?: string;
++  auth: string[];
++}
++
++export async function fetchCapabilities(server: string): Promise<Capabilities> {
++  const res = await serverFetch(server, null, 'GET', '/v1/capabilities');
++  if (!res.ok) throw await readError(res);
++  const caps = await res.json() as Capabilities;
++  if (caps.api_version && caps.api_version !== 'v1') {
++    throw new Error(`Server speaks API ${caps.api_version}; this CLI supports v1.`);
++  }
++  return caps;
++}
++
++export interface DeviceLoginResult {
++  credentials: ServerCredentials;
++  enrollmentProjectIds: string[];
++}
++
++/**
++ * OAuth device flow: print a short code, let the member approve it in the
++ * browser (or an admin's enrollment code pre-approves the project scope), poll
++ * until the server hands back tokens. No git, no API key to copy around.
++ */
++export async function deviceLogin(
++  server: string,
++  opts: { enrollmentCode?: string; onCode?: (userCode: string, url: string) => void; sleep?: (ms: number) => Promise<void> } = {},
++): Promise<DeviceLoginResult> {
++  const start = await serverFetch(server, null, 'POST', '/v1/auth/device/start', {
++    fingerprint: fingerprint(),
++    hostname: os.hostname(),
++    os: process.platform,
++    enrollment_code: opts.enrollmentCode ?? '',
++  });
++  if (!start.ok) throw await readError(start);
++  const s = await start.json() as { device_code: string; user_code: string; verification_url: string; interval?: number };
++  (opts.onCode ?? ((code, url) => log.info(`Open ${url} and enter code: ${code}`)))(s.user_code, s.verification_url);
++
++  const sleep = opts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
++  const interval = Math.max(s.interval ?? 2, 2) * 1000;
++  for (;;) {
++    await sleep(interval);
++    const res = await serverFetch(server, null, 'POST', '/v1/auth/device/poll', { device_code: s.device_code });
++    if (res.ok) {
++      const tok = await res.json() as { access_token: string; refresh_token: string; machine_id: string; enrollment_project_ids?: string[] };
++      const credentials = { server, accessToken: tok.access_token, refreshToken: tok.refresh_token, machineId: tok.machine_id };
++      await saveCredentials(credentials);
++      return { credentials, enrollmentProjectIds: tok.enrollment_project_ids ?? [] };
++    }
++    const err = await readError(res);
++    if (err.code === 'AUTHORIZATION_PENDING') continue;
++    throw err;
++  }
++}
++
++export async function listProjects(creds: ServerCredentials): Promise<ServerProject[]> {
++  const { data } = await apiCall<{ items: ServerProject[] }>(creds, 'GET', '/v1/projects');
++  return (data.items ?? []).filter((p) => !p.archived);
++}
++
++export async function createBinding(
++  creds: ServerCredentials,
++  dir: string,
++  projectIds: string[],
++): Promise<string> {
++  const { data } = await apiCall<{ id: string }>(creds, 'POST', '/v1/bindings', {
++    workspace_id: workspaceId(dir),
++    display_name: path.basename(dir),
++    project_ids: projectIds,
++  });
++  return data.id;
++}
++
++export async function deleteBinding(creds: ServerCredentials, bindingId: string): Promise<void> {
++  try {
++    await apiCall(creds, 'DELETE', `/v1/bindings/${bindingId}`);
++  } catch (e) {
++    if (!(e instanceof ServerError && e.status === 404)) throw e;
++  }
++}
++
++export async function revokeDevice(creds: ServerCredentials): Promise<void> {
++  await apiCall(creds, 'POST', '/v1/auth/revocations', { machine_id: creds.machineId });
++}
++
++// ── blobs ────────────────────────────────────────────────────
++
++export async function readBlob(creds: ServerCredentials, sha: string): Promise<Buffer> {
++  const hex = sha.replace(/^sha256:/, '');
++  const cached = path.join(blobCacheDir(), hex);
++  try {
++    const b = await fs.promises.readFile(cached);
++    if (sha256Hex(b) === hex) return b;
++  } catch { /* miss */ }
++  let res = await serverFetch(creds.server, creds.accessToken, 'GET', `/v1/blobs/${sha}`);
++  if (res.status === 401) {
++    await refresh(creds);
++    res = await serverFetch(creds.server, creds.accessToken, 'GET', `/v1/blobs/${sha}`);
++  }
++  if (!res.ok) throw await readError(res);
++  const b = Buffer.from(await res.arrayBuffer());
++  if (sha256Hex(b) !== hex) throw new Error(`blob ${sha} failed integrity check`);
++  await ensureDir(blobCacheDir());
++  await fs.promises.writeFile(cached, b);
++  return b;
++}
++
++// ── journal + materialize ────────────────────────────────────
++
++export async function loadJournal(localPath: string): Promise<Journal> {
++  const j = await readJson<Journal>(path.join(localPath, JOURNAL_FILE));
++  return { revision: j?.revision ?? '', files: j?.files ?? {} };
++}
++
++async function saveJournal(localPath: string, j: Journal): Promise<void> {
++  await writeJsonAtomic(path.join(localPath, JOURNAL_FILE), j);
++}
++
++export async function loadSnapshot(localPath: string): Promise<ServerSnapshot | null> {
++  return readJson<ServerSnapshot>(path.join(localPath, SNAPSHOT_FILE));
++}
++
++export interface ApplyResult {
++  kind: string;
++  name: string;
++  action: 'installed' | 'updated' | 'removed' | 'conflict_skipped' | 'failed';
++}
++
++async function writeAtomic(abs: string, content: Buffer): Promise<void> {
++  await ensureDir(path.dirname(abs));
++  const tmp = `${abs}.server-tmp`;
++  await fs.promises.writeFile(tmp, content);
++  await fs.promises.rename(tmp, abs);
++}
++
++async function removeEmptyParents(root: string, file: string): Promise<void> {
++  let dir = path.dirname(file);
++  while (dir !== root && dir.startsWith(root)) {
++    try { await fs.promises.rmdir(dir); } catch { return; }
++    dir = path.dirname(dir);
++  }
++}
++
++/** Reverse-map a rendered path to (kind, name) for the sync report. */
++export function classify(rel: string): { kind: string; name: string } {
++  const parts = rel.split('/');
++  if (parts[0] === 'skills' && parts.length >= 2) return { kind: 'skill', name: parts[1] };
++  if (parts[0] === 'rules' && parts.length === 2) return { kind: 'rule', name: parts[1].replace(/\.md$/, '') };
++  if (parts[0] === 'docs' && parts.length >= 2) return { kind: 'doc', name: rel.slice('docs/'.length) };
++  if (parts[0] === 'agents' && parts.length === 2) return { kind: 'agent', name: parts[1].replace(/\.yaml$/, '') };
++  if (parts[0] === 'claudemd' && parts.length === 3) return { kind: 'claudemd', name: parts[2].replace(/\.md$/, '') };
++  if (parts[0] === 'learnings' && parts.length === 2) return { kind: 'learning', name: parts[1].replace(/\.md$/, '') };
++  if (rel === 'env/env.yaml') return { kind: 'env', name: 'env.yaml' };
++  if (parts[0] === 'hooks') return { kind: 'hook', name: rel.slice('hooks/'.length) };
++  if (rel === 'mcp/mcp.yaml') return { kind: 'mcp', name: 'mcp.yaml' };
++  if (rel === 'culture.md') return { kind: 'culture', name: 'culture' };
++  if (rel === 'teamai.yaml' || rel === 'tags.yaml') return { kind: 'policy', name: rel };
++  return { kind: 'doc', name: rel };
++}
++
++/**
++ * Write rendered files under localPath, honouring local edits.
++ *
++ * Per file: absent → write (installed); on disk == journal hash → overwrite
++ * (updated); on disk differs from both → the member edited it → conflict_skipped,
++ * left untouched. Files in the previous journal but not in this render are
++ * removed only when still byte-identical to what we wrote.
++ */
++export async function applyFiles(
++  localPath: string,
++  files: Map<string, Buffer>,
++  previous: Journal,
++): Promise<{ results: ApplyResult[]; journal: Journal }> {
++  const results: ApplyResult[] = [];
++  const journal: Journal = { revision: '', files: {} };
++
++  for (const rel of [...files.keys()].sort()) {
++    const content = files.get(rel)!;
++    const want = sha256Hex(content);
++    const abs = path.join(localPath, ...rel.split('/'));
++    const { kind, name } = classify(rel);
++    let current: Buffer | null = null;
++    try { current = await fs.promises.readFile(abs); } catch { /* absent */ }
++
++    if (current === null) {
++      try { await writeAtomic(abs, content); results.push({ kind, name, action: 'installed' }); }
++      catch { results.push({ kind, name, action: 'failed' }); continue; }
++    } else if (sha256Hex(current) === want) {
++      // already the target content
++    } else if (previous.files[rel] === sha256Hex(current)) {
++      try { await writeAtomic(abs, content); results.push({ kind, name, action: 'updated' }); }
++      catch { results.push({ kind, name, action: 'failed' }); continue; }
++    } else {
++      // The member edited this file: it is theirs now. Deliberately NOT recorded in
++      // the journal, so a later removal pass can never treat it as ours and delete it.
++      results.push({ kind, name, action: 'conflict_skipped' });
++      continue;
++    }
++    journal.files[rel] = want;
++  }
++
++  for (const [rel, sum] of Object.entries(previous.files)) {
++    if (files.has(rel)) continue;
++    const abs = path.join(localPath, ...rel.split('/'));
++    const { kind, name } = classify(rel);
++    let current: Buffer | null = null;
++    try { current = await fs.promises.readFile(abs); } catch { continue; }
++    if (sha256Hex(current) !== sum) {
++      results.push({ kind, name, action: 'conflict_skipped' });
++      continue;
++    }
++    await fs.promises.unlink(abs);
++    await removeEmptyParents(localPath, abs);
++    results.push({ kind, name, action: 'removed' });
++  }
++  return { results, journal };
++}
++
++// ── sync ─────────────────────────────────────────────────────
++
++export interface SyncOutcome {
++  revision: string;
++  changed: boolean;
++  results: ApplyResult[];
++  conflicts: Array<{ kind: string; name: string }>;
++}
++
++/**
++ * Pull the binding's snapshot and materialize it. Returns `changed: false` on
++ * 304 (nothing to do). Sync results are reported back best-effort; a failed
++ * report never blocks the local update and is retried on the next sync.
++ */
++export async function syncServerRepo(
++  localConfig: LocalConfig,
++  opts: { force?: boolean } = {},
++): Promise<SyncOutcome> {
++  const creds = await loadCredentials();
++  if (!creds) throw new Error('Not logged in to the team server. Run `teamai init --server <url>` again.');
++  const bindingId = localConfig.repo.bindingId;
++  if (!bindingId) throw new Error('This directory is not bound to any project. Run `teamai init --server <url>` here.');
++  const localPath = localConfig.repo.localPath;
++  await ensureDir(localPath);
++  const previous = await loadJournal(localPath);
++
++  const headers: Record<string, string> = {};
++  if (previous.revision && !opts.force) headers['If-None-Match'] = `"${previous.revision}"`;
++  let snapRes: { status: number; data: ServerSnapshot };
++  try {
++    snapRes = await apiCall<ServerSnapshot>(creds, 'GET', `/v1/bindings/${bindingId}/snapshot`, undefined, headers);
++  } catch (e) {
++    if (e instanceof ServerError && e.status === 401) {
++      throw new Error('This device was revoked or the login expired. Run `teamai init --server <url>` to log in again.');
++    }
++    throw e;
++  }
++  if (snapRes.status === 304) {
++    return { revision: previous.revision, changed: false, results: [], conflicts: [] };
++  }
++  const snap = snapRes.data;
++
++  const files = await renderSnapshot(snap, (sha) => readBlob(creds, sha), creds.server);
++  const { results, journal } = await applyFiles(localPath, files, previous);
++  journal.revision = snap.revision;
++  await saveJournal(localPath, journal);
++  await writeJsonAtomic(path.join(localPath, SNAPSHOT_FILE), snap);
++
++  try {
++    await apiCall(creds, 'POST', `/v1/bindings/${bindingId}/sync-results`, {
++      applied_revision: snap.revision,
++      results: results.map((r) => ({ kind: r.kind, name: r.name, action: r.action })),
++    });
++  } catch (e) {
++    log.debug(`sync-results report failed (will retry next sync): ${(e as Error).message}`);
++  }
++
++  const conflicts = snap.resources.filter((e) => e.status === 'conflict').map((e) => ({ kind: e.kind, name: e.name }));
++  return { revision: snap.revision, changed: true, results, conflicts };
++}
++
++/** Remove everything the journal says we wrote and that the member never edited. */
++export async function purgeOwned(localPath: string): Promise<number> {
++  const journal = await loadJournal(localPath);
++  let n = 0;
++  for (const [rel, sum] of Object.entries(journal.files)) {
++    const abs = path.join(localPath, ...rel.split('/'));
++    try {
++      const cur = await fs.promises.readFile(abs);
++      if (sha256Hex(cur) !== sum) continue;
++      await fs.promises.unlink(abs);
++      await removeEmptyParents(localPath, abs);
++      n++;
++    } catch { /* absent */ }
++  }
++  for (const f of [JOURNAL_FILE, SNAPSHOT_FILE]) {
++    if (await pathExists(path.join(localPath, f))) await fs.promises.unlink(path.join(localPath, f));
++  }
++  return n;
++}
++
++// ── write direction ──────────────────────────────────────────
++
++export interface ChangeOp {
++  op: 'put' | 'delete';
++  level: 'org' | 'team' | 'project';
++  team_id?: string;
++  project_id?: string;
++  kind: string;
++  name: string;
++  files?: Array<{ path: string; sha256: string; size: number }>;
++  expected_prev_version?: number;
++}
++
++export interface ChangesetResp {
++  id: string;
++  state: string;
++  title: string;
++  etag: string;
++  ops: ChangeOp[];
++}
++
++export async function uploadBlob(creds: ServerCredentials, content: Buffer): Promise<{ sha256: string; size: number }> {
++  const sha = `sha256:${sha256Hex(content)}`;
++  await apiCall(creds, 'POST', '/v1/blobs', content, { 'X-Sha256': sha });
++  return { sha256: sha, size: content.length };
++}
++
++function opKey(o: ChangeOp): string {
++  return [o.level, o.team_id ?? '', o.project_id ?? '', o.kind, o.name].join('|');
++}
++
++/** My open (draft / in_review) changeset that already touches one of these resources, if any. */
++async function findOpenChangeset(creds: ServerCredentials, ops: ChangeOp[]): Promise<ChangesetResp | null> {
++  const { data } = await apiCall<{ items: ChangesetResp[] }>(creds, 'GET', '/v1/change-sets?view=mine');
++  const wanted = new Set(ops.map(opKey));
++  for (const cs of data.items ?? []) {
++    if (cs.state !== 'draft' && cs.state !== 'in_review') continue;
++    if ((cs.ops ?? []).some((o) => wanted.has(opKey(o)))) {
++      const full = await apiCall<ChangesetResp>(creds, 'GET', `/v1/change-sets/${cs.id}`);
++      return full.data;
++    }
++  }
++  return null;
++}
++
++/**
++ * Create a change set and submit it for review — or fold the operations into
++ * my open change set that already carries one of these resources, so editing a
++ * resource under review updates that review instead of opening a second one
++ * (what `teamai push` does with an existing MR).
++ */
++export async function submitChangeset(
++  creds: ServerCredentials,
++  input: { title: string; description?: string; ops: ChangeOp[]; fastTrack?: boolean },
++): Promise<ChangesetResp> {
++  const body: Record<string, unknown> = { title: input.title, description: input.description ?? '', ops: input.ops, fast_track: !!input.fastTrack };
++  let cs: ChangesetResp;
++  const existing = await findOpenChangeset(creds, input.ops);
++  if (existing) {
++    const replaced = new Set(input.ops.map(opKey));
++    body.ops = [...(existing.ops ?? []).filter((o) => !replaced.has(opKey(o))), ...input.ops];
++    body.title = existing.title || input.title;
++    cs = (await apiCall<ChangesetResp>(creds, 'PATCH', `/v1/change-sets/${existing.id}`, body, { 'If-Match': `"${existing.etag}"` })).data;
++    log.info(`Updated your open change set ${cs.id.slice(0, 8)}`);
++  } else {
++    cs = (await apiCall<ChangesetResp>(creds, 'POST', '/v1/change-sets', body)).data;
++  }
++  cs = (await apiCall<ChangesetResp>(creds, 'POST', `/v1/change-sets/${cs.id}/submit`)).data;
++  if (input.fastTrack) {
++    cs = (await apiCall<ChangesetResp>(creds, 'POST', `/v1/change-sets/${cs.id}/publish`)).data;
++  }
++  return cs;
++}
++
++export function changesetUrl(creds: ServerCredentials, id: string): string {
++  return `${creds.server}/#/changesets/${id}`;
++}
++
++export async function contributeLearning(
++  creds: ServerCredentials,
++  input: { title: string; content: string; projectId?: string; tags?: string[] },
++): Promise<ChangesetResp> {
++  const { data } = await apiCall<ChangesetResp>(creds, 'POST', '/v1/learnings', {
++    title: input.title, content: input.content, project_id: input.projectId, tags: input.tags,
++  });
++  return data;
++}
++
++export async function listTeams(creds: ServerCredentials): Promise<Array<{ id: string; slug: string }>> {
++  const { data } = await apiCall<{ items: Array<{ id: string; slug: string }> }>(creds, 'GET', '/v1/teams');
++  return data.items ?? [];
++}
++
++// ── reporting ────────────────────────────────────────────────
++
++export interface ReportEvent {
++  event_id: string;
++  seq: number;
++  type: 'vote_delta' | 'session_summary' | 'usage_daily' | 'skill_usage' | 'tool_use';
++  occurred_at: string;
++  payload: Record<string, unknown>;
++}
++
++function seqPath(): string {
++  return path.join(getUserHome(), '.teamai', 'server-report-seq.json');
++}
++
++/** Monotonic per-machine sequence; the server dedupes on (machine, event_id). */
++export async function nextSeq(count: number): Promise<number> {
++  const cur = (await readJson<{ seq: number }>(seqPath()))?.seq ?? 0;
++  await writeJsonAtomic(seqPath(), { seq: cur + count });
++  return cur + 1;
++}
++
++export async function reportEvents(creds: ServerCredentials, events: ReportEvent[]): Promise<{ accepted: string[] }> {
++  if (events.length === 0) return { accepted: [] };
++  const { data } = await apiCall<{ accepted: string[] }>(creds, 'POST', '/v1/reports/events', { events });
++  return data;
++}
+diff --git a/src/server-write.ts b/src/server-write.ts
+new file mode 100644
+index 0000000..3d1353c
+--- /dev/null
++++ b/src/server-write.ts
+@@ -0,0 +1,400 @@
++/**
++ * Write direction for `repo.kind === 'server'`: push, contribute, remove and
++ * usage reporting go straight to the management backend as change sets and
++ * report events. No git, no branches, no MRs — the console shows the review.
++ */
++
++import fs from 'node:fs';
++import path from 'node:path';
++import YAML from 'yaml';
++import { getHandler } from './resources/index.js';
++import { getUserVotesDir, type GlobalOptions, type LocalConfig, type ResourceItem, type ResourceType, type TeamaiConfig } from './types.js';
++import { listFilesRecursive, pathExists, readFileSafe, readJson, writeJsonAtomic } from './utils/fs.js';
++import { getUserHome } from './utils/home.js';
++import { log, spinner } from './utils/logger.js';
++import { askSelection } from './utils/prompt.js';
++import {
++  changesetUrl, contributeLearning, listTeams, loadCredentials, loadSnapshot, nextSeq, reportEvents, sha256Hex,
++  submitChangeset, uploadBlob, type ChangeOp, type ReportEvent, type ServerCredentials,
++} from './server-repo.js';
++import { ENTRY_FILE, type ServerSnapshot, type SnapshotEntry } from './server-format.js';
++
++const KIND_OF_TYPE: Record<string, string> = { skills: 'skill', rules: 'rule', agents: 'agent', env: 'env', mcp: 'mcp', docs: 'doc' };
++
++async function requireCreds(): Promise<ServerCredentials> {
++  const creds = await loadCredentials();
++  if (!creds) throw new Error('Not logged in to the team server. Run `teamai init --server <url>`.');
++  return creds;
++}
++
++function findEntry(snap: ServerSnapshot | null, kind: string, name: string): SnapshotEntry | undefined {
++  return snap?.resources.find((e) => e.kind === kind && e.name === name);
++}
++
++/**
++ * Decide where an operation lands. Existing resources keep their level and
++ * carry `expected_prev_version`; new ones go to the single bound project, or to
++ * the project named by --project.
++ */
++async function placeOp(
++  creds: ServerCredentials,
++  snap: ServerSnapshot | null,
++  op: ChangeOp,
++  projectSlug?: string,
++): Promise<ChangeOp> {
++  const existing = findEntry(snap, op.kind, op.name);
++  if (existing) {
++    op.level = (existing.level as ChangeOp['level']) ?? 'org';
++    if (existing.version) op.expected_prev_version = existing.version;
++    if (op.level === 'project') {
++      op.project_id = snap?.projects.find((p) => p.slug === existing.namespace)?.id;
++    } else if (op.level === 'team') {
++      op.team_id = (await listTeams(creds)).find((t) => t.slug === existing.namespace)?.id;
++    }
++    if (op.level !== 'org' && !op.project_id && !op.team_id) op.level = 'org'; // group-granted → its real level is org
++    return op;
++  }
++  const projects = snap?.projects ?? [];
++  if (projectSlug) {
++    const p = projects.find((x) => x.slug === projectSlug);
++    if (!p) throw new Error(`Project "${projectSlug}" is not bound to this directory (bound: ${projects.map((x) => x.slug).join(', ') || 'none'}).`);
++    op.level = 'project';
++    op.project_id = p.id;
++  } else if (projects.length === 1) {
++    op.level = 'project';
++    op.project_id = projects[0].id;
++  } else if (projects.length === 0) {
++    op.level = 'org';
++  } else {
++    throw new Error(`${op.kind}/${op.name} is new and this directory follows several projects — pass --project <slug> (${projects.map((x) => x.slug).join(', ')}).`);
++  }
++  return op;
++}
++
++async function fileOps(creds: ServerCredentials, dir: string, rel: string[]): Promise<{ files: ChangeOp['files']; changed: boolean }> {
++  const files: NonNullable<ChangeOp['files']> = [];
++  for (const r of rel.sort()) {
++    const content = await fs.promises.readFile(path.join(dir, ...r.split('/')));
++    files.push({ path: r, ...(await uploadBlob(creds, content)) });
++  }
++  return { files, changed: files.length > 0 };
++}
++
++/**
++ * Turn a scanned resource into a `put`, reading from its SOURCE (the AI-tool
++ * directory). localPath is never mutated by push: it stays a faithful mirror of
++ * the server, so the scanner keeps reporting the change as pending until the
++ * change set is published and the next sync brings it back down.
++ */
++async function opForItem(creds: ServerCredentials, item: ResourceItem): Promise<ChangeOp | null> {
++  const kind = KIND_OF_TYPE[item.type];
++  if (!kind) return null;
++  switch (item.type) {
++    case 'skills': {
++      const rel = (await listFilesRecursive(item.sourcePath)).filter((r) => !r.split('/').some((seg) => seg.startsWith('.')) && r !== 'CONTRIBUTORS');
++      const { files } = await fileOps(creds, item.sourcePath, rel);
++      return { op: 'put', level: 'org', kind, name: item.name, files };
++    }
++    case 'rules': {
++      let content = await readFileSafe(item.sourcePath);
++      if (content === null) throw new Error(`Cannot read rule source ${item.sourcePath}`);
++      if (item.sourcePath.endsWith('.mdc')) {
++        // Cursor keeps tool frontmatter in .mdc; push only the markdown body onto the team file.
++        const { mergeCursorBodyIntoTeamMd } = await import('./resources/cursor-mdc.js');
++        content = mergeCursorBodyIntoTeamMd(content, await readFileSafe(path.join(localPathOf(item), 'rules', `${item.name}.md`)));
++      }
++      return { op: 'put', level: 'org', kind, name: item.name, files: [{ path: ENTRY_FILE.rule, ...(await uploadBlob(creds, Buffer.from(content))) }] };
++    }
++    case 'agents': {
++      const agent = item as ResourceItem & { mergedSpec?: unknown; skipReason?: string };
++      if (agent.skipReason || !agent.mergedSpec) {
++        log.warn(`[agents] skipped ${item.name}: ${agent.skipReason ?? 'could not build the team YAML spec'}`);
++        return null;
++      }
++      const { serializeAgentYaml } = await import('./resources/agent-format.js');
++      const content = serializeAgentYaml(agent.mergedSpec as Parameters<typeof serializeAgentYaml>[0]);
++      return { op: 'put', level: 'org', kind, name: item.name, files: [{ path: ENTRY_FILE.agent, ...(await uploadBlob(creds, Buffer.from(content))) }] };
++    }
++    default:
++      return null;
++  }
++}
++
++let currentLocalPath = '';
++function localPathOf(_item: ResourceItem): string {
++  return currentLocalPath;
++}
++
++/**
++ * env.yaml is one merged file locally but one resource per variable on the
++ * server: diff each key against the last snapshot and emit a `put` per change.
++ * Secret variables never carry a value — the local env.yaml only ever sees an
++ * empty value for them, so they are skipped rather than pushed back as blank.
++ */
++async function envOps(creds: ServerCredentials, localPath: string, snap: ServerSnapshot | null): Promise<ChangeOp[]> {
++  const raw = await readFileSafe(path.join(localPath, 'env', 'env.yaml'));
++  if (!raw) return [];
++  let parsed: { variables?: Array<{ key: string; value?: string; description?: string }> };
++  try { parsed = YAML.parse(raw) ?? {}; } catch { return []; }
++  const ops: ChangeOp[] = [];
++  for (const v of parsed.variables ?? []) {
++    if (!v.key || v.value === undefined || v.value === '') continue;
++    const content = `value: ${YAML.stringify(v.value).trim()}\n${v.description ? `description: ${YAML.stringify(v.description).trim()}\n` : ''}`;
++    const existing = findEntry(snap, 'env', v.key);
++    const entry = existing?.files?.find((f) => f.path === ENTRY_FILE.env);
++    if (entry && entry.sha256 === `sha256:${sha256Hex(content)}`) continue;
++    ops.push({ op: 'put', level: 'org', kind: 'env', name: v.key, files: [{ path: ENTRY_FILE.env, ...(await uploadBlob(creds, Buffer.from(content))) }] });
++  }
++  return ops;
++}
++
++// ── push ─────────────────────────────────────────────────────
++
++export async function pushServer(
++  localConfig: LocalConfig,
++  teamConfig: TeamaiConfig,
++  options: GlobalOptions & { all?: boolean; project?: string; role?: string; skill?: string; fastTrack?: boolean },
++): Promise<void> {
++  const creds = await requireCreds();
++  const localPath = localConfig.repo.localPath;
++  const snap = await loadSnapshot(localPath);
++
++  const spin = spinner('Scanning local resources...').start();
++  const types: ResourceType[] = ['skills', 'rules', 'env', 'agents'];
++  const allItems: ResourceItem[] = [];
++  for (const type of types) {
++    const items = await getHandler(type).scanLocalForPush(teamConfig, localConfig);
++    allItems.push(...items);
++  }
++  spin.stop();
++
++  if (options.skill) {
++    const name = path.basename(options.skill.replace(/[/\\]+$/, ''));
++    const match = allItems.find((i) => i.type === 'skills' && (i.name === name || path.resolve(i.sourcePath) === path.resolve(options.skill!)));
++    if (!match) {
++      log.error(`Skill not found among local changes: ${options.skill}`);
++      process.exitCode = 1;
++      return;
++    }
++    allItems.length = 0;
++    allItems.push(match);
++  }
++  if (allItems.length === 0) {
++    log.info('No new or modified resources to push');
++    return;
++  }
++
++  console.log('');
++  console.log(`Found ${allItems.length} resource(s) to push:`);
++  allItems.forEach((item, i) => {
++    console.log(`  ${`${i + 1}.`.padStart(4)} [${item.type}] ${item.name} (${item.status === 'modified' ? 'modified' : 'new'})`);
++    console.log(`       from: ${item.sourcePath}`);
++  });
++  console.log('');
++  if (options.dryRun) {
++    log.info('Dry run — no changes made');
++    return;
++  }
++
++  let selected: ResourceItem[];
++  if (options.all || options.silent) {
++    selected = [...allItems];
++  } else {
++    const prompt = allItems.length === 1 ? 'Push this resource? [1/all/none] (default: all): ' : `Select items to push [1-${allItems.length}, or "all"] (default: all): `;
++    const idx = await askSelection(prompt, allItems.length, true);
++    if (!idx || idx.length === 0) { log.info('Cancelled'); return; }
++    selected = idx.map((i) => allItems[i]);
++  }
++
++  const pushSpin = spinner('Uploading to the team server...').start();
++  try {
++    currentLocalPath = localPath;
++    const ops: ChangeOp[] = [];
++    for (const item of selected) {
++      if (item.type === 'env') continue;
++      const op = await opForItem(creds, item);
++      if (op) ops.push(await placeOp(creds, snap, op, options.project));
++    }
++    if (selected.some((i) => i.type === 'env')) {
++      for (const op of await envOps(creds, localPath, snap)) ops.push(await placeOp(creds, snap, op, options.project));
++    }
++    if (ops.length === 0) {
++      pushSpin.succeed('Nothing to push (already up to date on the server)');
++      return;
++    }
++    const title = ops.length === 1 ? `${ops[0].op} ${ops[0].kind}/${ops[0].name}` : `Push ${ops.length} resource(s) from ${localConfig.username}`;
++    const cs = await submitChangeset(creds, {
++      title, ops, fastTrack: options.fastTrack,
++      description: ops.map((o) => `- [${o.kind}] ${o.name}`).join('\n'),
++    });
++    const verb = cs.state === 'published' ? 'Published' : 'Submitted for review';
++    pushSpin.succeed(`${verb}: ${ops.length} resource(s) → ${changesetUrl(creds, cs.id)}`);
++  } catch (e) {
++    pushSpin.fail(`Push failed: ${(e as Error).message}`);
++    process.exitCode = 1;
++  }
++}
++
++// ── contribute ───────────────────────────────────────────────
++
++export async function contributeServer(
++  localConfig: LocalConfig,
++  content: string,
++  options: { title?: string; sessionId?: string },
++): Promise<void> {
++  const creds = await requireCreds();
++  const snap = await loadSnapshot(localConfig.repo.localPath);
++  const title = options.title?.trim() || firstHeading(content) || 'Session notes';
++  const projectId = snap?.projects.length === 1 ? snap.projects[0].id : undefined;
++  const spin = spinner('Contributing session knowledge...').start();
++  try {
++    const cs = await contributeLearning(creds, { title, content, projectId });
++    const name = cs.ops?.[0]?.name;
++    // Make it recallable right away instead of waiting for the next sync.
++    if (name) {
++      const dest = path.join(localConfig.repo.localPath, 'learnings', `${name}.md`);
++      await fs.promises.mkdir(path.dirname(dest), { recursive: true });
++      await fs.promises.writeFile(dest, content, 'utf8');
++    }
++    spin.succeed(cs.state === 'published' ? `Contributed: learnings/${name}.md` : `Submitted for review: ${changesetUrl(creds, cs.id)}`);
++    if (options.sessionId) {
++      const { markContributed } = await import('./contribute-check.js');
++      await markContributed(options.sessionId);
++    }
++  } catch (e) {
++    const msg = (e as Error).message;
++    spin.fail(msg.includes('SECRET_DETECTED') ? `Rejected: the content looks like it contains a secret — remove it and retry. (${msg})` : `Contribution failed: ${msg}`);
++    process.exitCode = 1;
++  }
++}
++
++function sessionDurationMs(s: { startedAt?: string; lastActivity?: string; stoppedAt?: string } | undefined): number {
++  if (!s?.startedAt) return 0;
++  const end = Date.parse(s.stoppedAt || s.lastActivity || '');
++  const start = Date.parse(s.startedAt);
++  return Number.isFinite(end) && Number.isFinite(start) && end > start ? end - start : 0;
++}
++
++function firstHeading(content: string): string | null {
++  const m = content.match(/^#\s+(.+)$/m);
++  return m ? m[1].trim() : null;
++}
++
++// ── remove ───────────────────────────────────────────────────
++
++export async function removeServer(
++  localConfig: LocalConfig,
++  type: string,
++  names: string[],
++  options: GlobalOptions & { fastTrack?: boolean },
++): Promise<void> {
++  const creds = await requireCreds();
++  const snap = await loadSnapshot(localConfig.repo.localPath);
++  const kind = KIND_OF_TYPE[type];
++  const ops: ChangeOp[] = [];
++  const missing: string[] = [];
++  for (const name of names) {
++    if (!findEntry(snap, kind, name)) { missing.push(name); continue; }
++    ops.push(await placeOp(creds, snap, { op: 'delete', level: 'org', kind, name }));
++  }
++  if (missing.length) log.warn(`Not on the server (skipping): ${missing.join(', ')}`);
++  if (ops.length === 0) { log.error('No matching resources found to remove'); return; }
++  console.log(`Will submit removal of ${ops.length} ${type}: ${ops.map((o) => o.name).join(', ')}`);
++  if (options.dryRun) { log.info('Dry run — no changes made'); return; }
++  const cs = await submitChangeset(creds, { title: `Remove ${ops.length} ${type} (${localConfig.username})`, ops, fastTrack: options.fastTrack });
++  log.success(cs.state === 'published' ? 'Removed. They disappear from every machine on its next sync.' : `Removal submitted for review: ${changesetUrl(creds, cs.id)}`);
++}
++
++// ── reporting ────────────────────────────────────────────────
++
++interface ReportedSnapshot { sessions: Record<string, { prompts: number; interrupt: number; toolReject: number; correction: number }>; daily: Record<string, unknown> }
++
++function reportedPath(): string {
++  return path.join(getUserHome(), '.teamai', 'server-reported.json');
++}
++
++/**
++ * Report skill usage, votes, per-session summaries and daily usage to the
++ * server. Idempotent: skill events are truncated by the caller after success,
++ * votes carry their own pending deltas, sessions/days are tracked in a local
++ * "already reported" snapshot so a re-run never double-counts.
++ */
++export async function reportToServer(localConfig: LocalConfig, opts: { projectRoot?: string; excludeProjectRoots?: string[] } = {}): Promise<{ sent: number }> {
++  const creds = await requireCreds();
++  const snap = await loadSnapshot(localConfig.repo.localPath);
++  const events: Array<Omit<ReportEvent, 'seq'>> = [];
++  const now = new Date().toISOString();
++
++  // skill usage
++  const { readUsageEvents } = await import('./usage-tracker.js');
++  const { aggregateUsage } = await import('./stats.js');
++  const usage = await readUsageEvents();
++  for (const s of aggregateUsage(usage)) {
++    events.push({ event_id: `skill:${s.name}:${s.lastUsed.toISOString()}:${s.count}`, type: 'skill_usage', occurred_at: s.lastUsed.toISOString(), payload: { skill: s.name, count: s.count } });
++  }
++
++  // votes: local pending deltas keyed by learning name → server resource id
++  const { loadUserVotes, saveUserVotes } = await import('./votes.js');
++  const votePath = path.join(getUserVotesDir(), `${localConfig.username}.yaml`);
++  const votes = await loadUserVotes(votePath);
++  const voteIds: string[] = [];
++  for (const [docId, d] of Object.entries(votes.deltas ?? {})) {
++    const entry = snap?.resources.find((e) => e.kind === 'learning' && (e.name === docId || `${e.name}.md` === docId));
++    const bundleId = (entry as SnapshotEntry & { resource_id?: string } | undefined)?.resource_id;
++    if (!bundleId) continue;
++    voteIds.push(docId);
++    events.push({ event_id: `vote:${docId}:${now}`, type: 'vote_delta', occurred_at: now, payload: { bundle_id: bundleId, recalled_delta: d.recalled_delta, upvoted_delta: d.upvoted_delta } });
++  }
++
++  // sessions + daily
++  const reported = (await readJson<ReportedSnapshot>(reportedPath())) ?? { sessions: {}, daily: {} };
++  const { readEvents, aggregateSessionMetrics, rebuildSessions } = await import('./dashboard-collector.js');
++  const { filterEventsByScope } = await import('./team-push.js');
++  const { aggregateDailySessions, computeDailyStatsDelta } = await import('./session-trends.js');
++  const dashboard = filterEventsByScope(await readEvents(), opts);
++  const metrics = aggregateSessionMetrics(dashboard);
++  const sessions = rebuildSessions(dashboard);
++  const nextSessions = { ...reported.sessions };
++  for (const [sid, m] of metrics) {
++    const prev = reported.sessions[sid];
++    if (prev && prev.prompts === m.prompts && prev.interrupt === m.interrupt && prev.toolReject === m.toolReject && prev.correction === m.correction) continue;
++    const s = sessions.find((x) => x.sessionId === sid);
++    const toolTotal = dashboard.filter((e) => e.sessionId === sid && e.type === 'tool_use').length;
++    events.push({
++      event_id: `session:${sid}:${m.prompts}:${m.interrupt + m.toolReject + m.correction}`, type: 'session_summary', occurred_at: now,
++      payload: {
++        session_id: sid, tool: s?.tool ?? dashboard.find((e) => e.sessionId === sid)?.tool ?? '',
++        started_at: s?.startedAt ?? dashboard.find((e) => e.sessionId === sid)?.timestamp,
++        duration_ms: sessionDurationMs(s), prompt_turns: m.prompts, tool_total: toolTotal,
++        interventions: { interrupt: m.interrupt, tool_reject: m.toolReject, tool_error: m.correction },
++        tokens: { input: m.tokens?.input ?? 0, output: m.tokens?.output ?? 0, cache_read: m.tokens?.cacheRead ?? 0, cache_write: m.tokens?.cacheCreation ?? 0 },
++      },
++    });
++    nextSessions[sid] = { prompts: m.prompts, interrupt: m.interrupt, toolReject: m.toolReject, correction: m.correction };
++  }
++  const { delta: daily, nextReported: nextDaily } = computeDailyStatsDelta(aggregateDailySessions(dashboard), reported.daily as never);
++  for (const [day, d] of Object.entries(daily)) {
++    if (!d.sessionsEnded && !d.promptTurns && !d.durationMs) continue;
++    events.push({
++      event_id: `daily:${day}:${now}`, type: 'usage_daily', occurred_at: now,
++      payload: {
++        day, sessions_ended: d.sessionsEnded, sessions_succeeded: d.sessionsSucceeded, prompt_turns: d.promptTurns, duration_ms: d.durationMs,
++        sessions_corrected: d.sessionsCorrected, priced_requests: d.pricedRequests, cost_micros: d.costMicros,
++        cache_read_tokens: d.cacheReadTokens, cache_eligible_input_tokens: d.cacheEligibleInputTokens,
++      },
++    });
++  }
++
++  if (events.length === 0) return { sent: 0 };
++  const first = await nextSeq(events.length);
++  const batch: ReportEvent[] = events.map((e, i) => ({ ...e, seq: first + i }));
++  await reportEvents(creds, batch);
++
++  // advance local bookkeeping only after the server accepted the batch
++  if (voteIds.length) {
++    for (const id of voteIds) delete votes.deltas[id];
++    await saveUserVotes(votePath, votes);
++  }
++  await writeJsonAtomic(reportedPath(), { sessions: nextSessions, daily: { ...reported.daily, ...nextDaily } });
++  return { sent: batch.length };
++}
+diff --git a/src/status.ts b/src/status.ts
+index 2c65bac..d06f7f4 100644
+--- a/src/status.ts
++++ b/src/status.ts
+@@ -52,7 +52,16 @@ export async function status(options: GlobalOptions): Promise<void> {
+   // Git status
+   console.log('');
+   log.info('Team repo status:');
+-  try {
++  if (localConfig.repo.kind === 'server') {
++    // Management backend: no git; show the server, the binding and the last synced revision.
++    const { loadJournal, loadSnapshot } = await import('./server-repo.js');
++    const journal = await loadJournal(localConfig.repo.localPath);
++    const snap = await loadSnapshot(localConfig.repo.localPath);
++    console.log(`  server: ${localConfig.repo.url ?? localConfig.repo.remote}`);
++    console.log(`  projects: ${snap?.projects.map((p) => p.slug).join(', ') || '(none)'}`);
++    console.log(`  revision: ${journal.revision ? journal.revision.slice(0, 19) : 'not synced yet'}`);
++    console.log(`  local: ${localConfig.repo.localPath}`);
++  } else try {
+     const gitStatus = await getRepoStatus(localConfig.repo.localPath);
+     console.log(`  repo: ${localConfig.repo.remote}`);
+     console.log(`  local: ${localConfig.repo.localPath}`);
+diff --git a/src/types.ts b/src/types.ts
+index 66b9bfd..32f2829 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -230,7 +230,7 @@ export const TeamaiConfigSchema = z.object({
+    * side (write local config, inject hooks, register member). undefined = a
+    * standalone team repo (existing behavior). See detectProjectConfig / bootstrapSelfRepo.
+    */
+-  mode: z.enum(['self']).optional(),
++  mode: z.enum(['self', 'server']).optional(),
+   reviewers: z.array(z.string()).default([]),
+   /** Skills this team makes available to other teams via cross-team subscription. */
+   publicSkills: z.array(z.string()).optional(),
+@@ -342,10 +342,17 @@ export const LocalConfigSchema = z.object({
+      *           Knowledge lives on main under <businessRepoRoot>/.teamai/;
+      *           reports (members/sessions/votes/stats) live on the
+      *           `teamai-reports` orphan branch. localPath = <businessRepoRoot>/.teamai.
++     * - 'server': git-free team repo served by the TeamAI management backend
++     *           (issue #341). The backend resolves org/team/project levels and
++     *           permissions; snapshots are materialized into <home>/team-repo,
++     *           so every ResourceHandler reads it like a clone. Read AND write
++     *           (push/contribute go through change sets), no git anywhere.
+      */
+-    kind: z.enum(['git', 'http', 'self']).optional(),
+-    /** Base URL of the HTTP team repo (only when kind === 'http'). */
++    kind: z.enum(['git', 'http', 'self', 'server']).optional(),
++    /** Base URL of the HTTP team repo / management backend (kind === 'http' | 'server'). */
+     url: z.string().optional(),
++    /** Workspace binding id on the management backend (only when kind === 'server'). */
++    bindingId: z.string().optional(),
+     /**
+      * Git root of the business repo (only when kind === 'self').
+      * Equals the parent directory of localPath. All git write operations
+-- 
+2.50.1 (Apple Git-155)
+
