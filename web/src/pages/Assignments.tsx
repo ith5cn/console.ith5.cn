@@ -1,8 +1,7 @@
 import { useState } from 'react'
-import { ChevronRight, Plus } from 'lucide-react'
+import { Plus, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
-import { api } from '../api'
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog'
+import { api, type Assignment } from '@/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -10,19 +9,120 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { Empty, Err, fmtTime, PageHeader, TableSkeleton, useAsync } from '../ui'
+import { Empty, Err, fmtTime, PageHeader, TableSkeleton, useAsync } from '@/ui'
 
-export function Assignments() {
-  const list = useAsync(() => api.listAssignments()); const groups = useAsync(() => api.listGroups()); const bundles = useAsync(() => api.listBundles()); const members = useAsync(() => api.listMembers()); const [adding, setAdding] = useState(false)
-  async function remove(id: string) { try { await api.deleteAssignment(id); toast.success('授权已撤销'); list.reload() } catch (error) { toast.error((error as Error).message) } }
-  return <><PageHeader title="授权策略" description="明确谁能获得什么，以及授权何时失效。" action={<Button onClick={() => setAdding(true)}><Plus />新增授权</Button>} /><Add open={adding} groups={groups.data?.groups ?? []} bundles={bundles.data?.bundles ?? []} members={members.data?.members ?? []} onOpenChange={setAdding} onDone={() => { setAdding(false); list.reload() }} /><Err msg={list.err} />{list.loading ? <TableSkeleton /> : !list.data?.assignments.length ? <Empty>还没有授权</Empty> : <Card className="overflow-hidden"><Table><TableHeader><TableRow><TableHead>授权目标</TableHead><TableHead>授予给</TableHead><TableHead>授权路径</TableHead><TableHead>有效期</TableHead><TableHead>创建时间</TableHead><TableHead /></TableRow></TableHeader><TableBody>{list.data.assignments.map((a) => <TableRow key={a.id}><TableCell>{a.group_name ? <Badge variant="accent">{a.group_name}</Badge> : <Badge>{a.bundle_name}</Badge>}</TableCell><TableCell>{a.subject_type === 'org' ? '全组织' : (a.subject_name || a.subject_id)}<div className="text-xs text-muted-foreground">{a.subject_type}</div></TableCell><TableCell><span className="flex items-center gap-1.5 text-muted-foreground">{a.group_name ? '权限组' : '单项'}<ChevronRight className="size-3" />{a.subject_type === 'org' ? '组织' : '成员'}</span></TableCell><TableCell>{a.expires_at ? <>{fmtTime(a.expires_at)}{a.expired && <Badge variant="destructive" className="ml-2">已到期</Badge>}</> : <span className="text-muted-foreground">永久</span>}</TableCell><TableCell className="whitespace-nowrap text-muted-foreground">{fmtTime(a.created_at)}</TableCell><TableCell className="text-right"><AlertDialog><AlertDialogTrigger asChild><Button variant="ghost" size="sm" className="text-destructive hover:text-destructive">撤销</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>撤销这条授权？</AlertDialogTitle><AlertDialogDescription>成员下次同步时将不再通过此授权获得对应内容。</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>取消</AlertDialogCancel><AlertDialogAction onClick={() => remove(a.id)}>确认撤销</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></TableCell></TableRow>)}</TableBody></Table></Card>}</>
+function subjectLabel(a: Assignment) {
+  if (a.subject_type === 'org') return '全组织'
+  return `${a.subject_type === 'user' ? '成员' : '项目'} · ${a.subject_name || a.subject_id}`
 }
 
-function Add({ open, groups, bundles, members, onOpenChange, onDone }: { open: boolean; groups: { id: string; name: string }[]; bundles: { id: string; name: string }[]; members: { id: string; email: string }[]; onOpenChange: (v: boolean) => void; onDone: () => void }) {
-  const [mode, setMode] = useState<'group' | 'bundle'>('group'); const [targetId, setTargetId] = useState(''); const [subject, setSubject] = useState<'org' | 'user'>('org'); const [subjectId, setSubjectId] = useState(''); const [expires, setExpires] = useState(''); const [err, setErr] = useState(''); const [busy, setBusy] = useState(false)
-  async function submit(e: React.FormEvent) { e.preventDefault(); setErr(''); setBusy(true); try { await api.createAssignment({ ...(mode === 'group' ? { group_id: targetId } : { bundle_id: targetId }), subject_type: subject, ...(subject === 'user' ? { subject_id: subjectId } : {}), ...(expires ? { expires_at: new Date(expires).toISOString() } : {}) }); toast.success('授权已创建'); onDone() } catch (error) { setErr((error as Error).message) } finally { setBusy(false) } }
-  const options = mode === 'group' ? groups : bundles
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent><DialogHeader><DialogTitle>新增授权</DialogTitle><DialogDescription>常规场景优先授权权限组；单项授权用于临时例外。</DialogDescription></DialogHeader><form onSubmit={submit} className="space-y-4"><div><Label>授权目标</Label><Tabs value={mode} onValueChange={(v) => { setMode(v as 'group' | 'bundle'); setTargetId('') }} className="mt-2"><TabsList><TabsTrigger value="group">权限组</TabsTrigger><TabsTrigger value="bundle">单个内容</TabsTrigger></TabsList></Tabs><Select value={targetId} onValueChange={setTargetId}><SelectTrigger className="mt-3" aria-label="选择授权目标"><SelectValue placeholder="请选择…" /></SelectTrigger><SelectContent>{options.map((o) => <SelectItem key={o.id} value={o.id}>{o.name}</SelectItem>)}</SelectContent></Select></div><div className="space-y-2"><Label>授予给</Label><Select value={subject} onValueChange={(v) => setSubject(v as 'org' | 'user')}><SelectTrigger aria-label="授权对象类型"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="org">全组织</SelectItem><SelectItem value="user">指定成员</SelectItem></SelectContent></Select>{subject === 'user' && <Select value={subjectId} onValueChange={setSubjectId}><SelectTrigger aria-label="选择成员"><SelectValue placeholder="请选择成员…" /></SelectTrigger><SelectContent>{members.map((m) => <SelectItem key={m.id} value={m.id}>{m.email}</SelectItem>)}</SelectContent></Select>}</div><div className="space-y-2"><Label htmlFor="assignment-expires">到期时间</Label><Input id="assignment-expires" type="datetime-local" value={expires} onChange={(e) => setExpires(e.target.value)} /><p className="text-xs text-muted-foreground">留空为永久；外包、实习和临时支援建议设置。</p></div><Err msg={err} /><DialogFooter><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>取消</Button><Button disabled={!targetId || (subject === 'user' && !subjectId) || busy}>{busy ? '授权中…' : '确认授权'}</Button></DialogFooter></form></DialogContent></Dialog>
+export function Assignments() {
+  const { data, err, loading, reload } = useAsync(() => api.assignments())
+  const [creating, setCreating] = useState(false)
+
+  async function remove(id: string) {
+    try {
+      await api.deleteAssignment(id)
+      toast.success('已撤销授权')
+      reload()
+    } catch (e) { toast.error((e as Error).message) }
+  }
+
+  return (
+    <>
+      <PageHeader
+        title="授权策略"
+        description="把权限组或单个资源授权给成员、项目或全组织。可设到期时间；到期后自动失效但保留记录以便审计。"
+        action={<Button onClick={() => setCreating(true)}><Plus />新增授权</Button>}
+      />
+      <Err msg={err} />
+      {loading ? <TableSkeleton /> : !data?.items.length ? <Empty>还没有授权。</Empty> : (
+        <Card className="overflow-hidden">
+          <Table>
+            <TableHeader><TableRow><TableHead>授权内容</TableHead><TableHead>授予</TableHead><TableHead>到期</TableHead><TableHead>创建</TableHead><TableHead /></TableRow></TableHeader>
+            <TableBody>
+              {data.items.map((a) => (
+                <TableRow key={a.id} className={a.expired ? 'opacity-60' : ''}>
+                  <TableCell>{a.group_name ? <><Badge>权限组</Badge> <span className="font-medium">{a.group_name}</span></> : <><Badge variant="secondary">资源</Badge> <span className="font-medium">{a.bundle_name}</span></>}</TableCell>
+                  <TableCell>{subjectLabel(a)}</TableCell>
+                  <TableCell className="text-muted-foreground">{a.expires_at ? <>{fmtTime(a.expires_at)}{a.expired && <Badge variant="destructive" className="ml-2">已过期</Badge>}</> : '永久'}</TableCell>
+                  <TableCell className="whitespace-nowrap text-muted-foreground">{fmtTime(a.created_at)}</TableCell>
+                  <TableCell className="text-right"><Button variant="ghost" size="sm" className="text-destructive" onClick={() => remove(a.id)}><Trash2 />撤销</Button></TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Card>
+      )}
+      {creating && <CreateAssignment onClose={() => { setCreating(false); reload() }} />}
+    </>
+  )
+}
+
+function CreateAssignment({ onClose }: { onClose: () => void }) {
+  const groups = useAsync(() => api.groups())
+  const resources = useAsync(() => api.resources())
+  const members = useAsync(() => api.members())
+  const projects = useAsync(() => api.projects())
+  const [targetKind, setTargetKind] = useState<'group' | 'bundle'>('group')
+  const [target, setTarget] = useState('')
+  const [subjectType, setSubjectType] = useState('user')
+  const [subject, setSubject] = useState('')
+  const [expires, setExpires] = useState('')
+  const [err, setErr] = useState('')
+
+  async function submit() {
+    try {
+      await api.createAssignment({
+        group_id: targetKind === 'group' ? target : undefined,
+        bundle_id: targetKind === 'bundle' ? target : undefined,
+        subject_type: subjectType,
+        subject_id: subjectType === 'org' ? undefined : subject,
+        expires_at: expires ? new Date(expires).toISOString() : undefined,
+      })
+      toast.success('已授权')
+      onClose()
+    } catch (e) { setErr((e as Error).message) }
+  }
+
+  const ready = target && (subjectType === 'org' || subject)
+  return (
+    <Dialog open onOpenChange={onClose}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>新增授权</DialogTitle><DialogDescription>常规路径是授权权限组；直接授权单个资源用于一次性或临时需要。</DialogDescription></DialogHeader>
+        <div className="grid gap-3">
+          <div className="space-y-1"><Label>授权内容</Label>
+            <div className="flex gap-2">
+              <Select value={targetKind} onValueChange={(v) => { setTargetKind(v as 'group' | 'bundle'); setTarget('') }}><SelectTrigger className="w-32"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="group">权限组</SelectItem><SelectItem value="bundle">单个资源</SelectItem></SelectContent></Select>
+              <Select value={target} onValueChange={setTarget}><SelectTrigger><SelectValue placeholder="选择" /></SelectTrigger>
+                <SelectContent>
+                  {targetKind === 'group'
+                    ? groups.data?.items.filter((g) => !g.archived).map((g) => <SelectItem key={g.id} value={g.id}>{g.name}</SelectItem>)
+                    : resources.data?.items.filter((r) => !r.deleted).map((r) => <SelectItem key={r.id} value={r.id}>{r.kind}/{r.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <div className="space-y-1"><Label>授予</Label>
+            <div className="flex gap-2">
+              <Select value={subjectType} onValueChange={(v) => { setSubjectType(v); setSubject('') }}><SelectTrigger className="w-32"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="user">成员</SelectItem><SelectItem value="project">项目</SelectItem><SelectItem value="org">全组织</SelectItem></SelectContent></Select>
+              {subjectType !== 'org' && (
+                <Select value={subject} onValueChange={setSubject}><SelectTrigger><SelectValue placeholder="选择" /></SelectTrigger>
+                  <SelectContent>
+                    {subjectType === 'user'
+                      ? members.data?.items.map((m) => <SelectItem key={m.user_id} value={m.user_id}>{m.email}</SelectItem>)
+                      : projects.data?.items.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+          </div>
+          <div className="space-y-1"><Label htmlFor="a-exp">到期时间（可选）</Label><Input id="a-exp" type="datetime-local" value={expires} onChange={(e) => setExpires(e.target.value)} /></div>
+        </div>
+        <Err msg={err} />
+        <DialogFooter><Button variant="outline" onClick={onClose}>取消</Button><Button onClick={submit} disabled={!ready}>授权</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
 }

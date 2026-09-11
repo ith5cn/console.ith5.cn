@@ -1,13 +1,10 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api, type Bundle, DEMO_READ_ONLY_MESSAGE, type UserInfo } from '@/api'
+import { api, setSession, type Me, type Membership } from '@/api'
 import { AppShell } from '@/components/AppShell'
-import { QuickStart } from '@/components/QuickStart'
-import { Bundles } from '@/pages/Bundles'
 import { Login } from '@/pages/Login'
-import { Overview } from '@/pages/Overview'
-import { toCSV } from '@/ui'
+import { parseHash } from '@/navigation'
 
 afterEach(() => {
   cleanup()
@@ -15,196 +12,70 @@ afterEach(() => {
   localStorage.clear()
 })
 
-describe('Login', () => {
-  const user: UserInfo = { id: 'u1', email: 'owner@example.com', role: 'owner', org_id: 'o1' }
+const account = { id: 'a1', email: 'owner@example.com', name: 'Owner' }
+const membership: Membership = { user_id: 'u1', org_id: 'o1', org_slug: 'acme', org_name: 'Acme', role: 'owner' }
+const me: Me = { account, membership, token_kind: 'session', permissions: ['project:read', 'resource:write', 'membership:manage', 'audit:read'] }
 
-  it('submits credentials and returns the logged-in user', async () => {
-    vi.spyOn(api, 'login').mockResolvedValue(user)
+describe('Login', () => {
+  it('logs straight in when the account belongs to one organization', async () => {
+    vi.spyOn(api, 'login').mockResolvedValue({ account, login_token: 'lt', organizations: [membership] })
+    vi.spyOn(api, 'session').mockResolvedValue(me)
     const onDone = vi.fn()
     render(<Login onDone={onDone} />)
-    await userEvent.type(screen.getByLabelText('邮箱'), user.email)
+    await userEvent.type(screen.getByLabelText('邮箱'), account.email)
     await userEvent.type(screen.getByLabelText('密码'), 'password')
     await userEvent.click(screen.getByRole('button', { name: /进入控制台/ }))
-    await waitFor(() => expect(onDone).toHaveBeenCalledWith(user))
-    expect(api.login).toHaveBeenCalledWith('demo', user.email, 'password')
+    await waitFor(() => expect(onDone).toHaveBeenCalledWith(me))
+    expect(api.session).toHaveBeenCalledWith('lt', 'u1')
   })
 
-  it('shows an API error and prevents duplicate submits while pending', async () => {
-    let rejectLogin!: (reason: Error) => void
-    vi.spyOn(api, 'login').mockImplementation(() => new Promise((_, reject) => { rejectLogin = reject }))
-    render(<Login onDone={() => {}} />)
-    await userEvent.type(screen.getByLabelText('邮箱'), user.email)
+  it('asks which organization to enter when there are several', async () => {
+    const other: Membership = { ...membership, user_id: 'u2', org_id: 'o2', org_slug: 'beta', org_name: 'Beta', role: 'member' }
+    vi.spyOn(api, 'login').mockResolvedValue({ account, login_token: 'lt', organizations: [membership, other] })
+    vi.spyOn(api, 'session').mockResolvedValue(me)
+    const onDone = vi.fn()
+    render(<Login onDone={onDone} />)
+    await userEvent.type(screen.getByLabelText('邮箱'), account.email)
     await userEvent.type(screen.getByLabelText('密码'), 'password')
     await userEvent.click(screen.getByRole('button', { name: /进入控制台/ }))
-    expect(screen.getByRole('button', { name: '登录中…' })).toBeDisabled()
-    rejectLogin(new Error('账号或密码错误'))
+    await userEvent.click(await screen.findByRole('button', { name: /Beta/ }))
+    await waitFor(() => expect(onDone).toHaveBeenCalledWith(me))
+    expect(api.session).toHaveBeenCalledWith('lt', 'u2')
+  })
+
+  it('shows the API error and re-enables the form', async () => {
+    vi.spyOn(api, 'login').mockRejectedValue(new Error('账号或密码错误'))
+    render(<Login onDone={() => {}} />)
+    await userEvent.type(screen.getByLabelText('邮箱'), account.email)
+    await userEvent.type(screen.getByLabelText('密码'), 'password')
+    await userEvent.click(screen.getByRole('button', { name: /进入控制台/ }))
     expect(await screen.findByText('账号或密码错误')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /进入控制台/ })).toBeEnabled()
   })
 })
 
 describe('AppShell', () => {
-  const shellProps = { user: { id: 'u', email: 'owner@example.com', role: 'owner', org_id: 'o' }, page: 'overview' as const, onLogout: () => {} }
-
-  it('emits the selected navigation page', async () => {
-    const onPageChange = vi.fn()
-    render(<AppShell {...shellProps} onPageChange={onPageChange}><div>content</div></AppShell>)
-    await userEvent.click(screen.getAllByRole('button', { name: '内容库' })[0])
-    expect(onPageChange).toHaveBeenCalledWith('bundles')
+  it('hides navigation the member has no permission for', () => {
+    setSession('t', { ...me, permissions: ['project:read'] })
+    render(<AppShell me={{ ...me, permissions: ['project:read'] }} page="overview" onLogout={() => {}}><div>content</div></AppShell>)
+    expect(screen.getAllByText('内容库').length).toBeGreaterThan(0)
+    expect(screen.queryByText('审计')).not.toBeInTheDocument()
+    expect(screen.queryByText('身份源')).not.toBeInTheDocument()
   })
 
-  it('closes the mobile sheet after navigation', async () => {
-    const onPageChange = vi.fn()
-    render(<AppShell {...shellProps} onPageChange={onPageChange}><div>content</div></AppShell>)
-    await userEvent.click(screen.getByRole('button', { name: '打开导航' }))
-    const sheet = screen.getByRole('dialog')
-    await userEvent.click(within(sheet).getByRole('button', { name: '内容库' }))
-    expect(onPageChange).toHaveBeenCalledWith('bundles')
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
-  })
-
-  it('shows a read-only banner for demo viewers', () => {
-    render(<AppShell {...shellProps} user={{ ...shellProps.user, role: 'viewer' }} onPageChange={() => {}}><div>content</div></AppShell>)
-    expect(screen.getByText('当前是演示环境，你可以浏览所有页面，但无法修改数据。')).toBeInTheDocument()
+  it('shows a read-only banner for viewers', () => {
+    const viewer: Me = { ...me, membership: { ...membership, role: 'viewer' }, permissions: ['project:read'] }
+    setSession('t', viewer)
+    render(<AppShell me={viewer} page="overview" onLogout={() => {}}><div>content</div></AppShell>)
+    expect(screen.getByText(/只读/)).toBeInTheDocument()
   })
 })
 
-describe('Demo viewer API', () => {
-  function setViewer() {
-    localStorage.setItem('ith5_token', 'demo-token')
-    localStorage.setItem('ith5_user', JSON.stringify({ id: 'u', email: 'demo@example.com', role: 'viewer', org_id: 'o' }))
-  }
-
-  it('blocks admin mutations before sending a network request', async () => {
-    setViewer()
-    const fetchMock = vi.spyOn(globalThis, 'fetch')
-
-    await expect(api.createGroup('demo', 'Demo', '')).rejects.toThrow(DEMO_READ_ONLY_MESSAGE)
-    expect(fetchMock).not.toHaveBeenCalled()
-  })
-
-  it('allows device activation while a viewer session exists', async () => {
-    setViewer()
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
-      JSON.stringify({ status: 'approved' }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } },
-    ))
-
-    await expect(api.activate('ABCD-EFGH', 'demo', 'test@ith5.cn', 'password')).resolves.toEqual({ status: 'approved' })
-    expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/device/activate', expect.objectContaining({ method: 'POST' }))
-  })
-})
-
-describe('Overview', () => {
-  function mockHealthyOverview() {
-    vi.spyOn(api, 'listGroups').mockResolvedValue({ groups: [] })
-    vi.spyOn(api, 'listAssignments').mockResolvedValue({ assignments: [] })
-    vi.spyOn(api, 'listMembers').mockResolvedValue({ members: [] })
-    vi.spyOn(api, 'staleMachines').mockResolvedValue({ machines: [] })
-    vi.spyOn(api, 'audit').mockResolvedValue({ entries: [] })
-  }
-
-  it('derives dashboard metrics from existing APIs', async () => {
-    mockHealthyOverview()
-    vi.spyOn(api, 'listBundles').mockResolvedValue({ bundles: [{ id: 'b', name: 'one', kind: 'skill', description: '', archived: false, latest_version: 2, checksum: '', updated_at: '' }] })
-    render(<Overview />)
-    expect(await screen.findByText('1 项内容')).toBeInTheDocument()
-    expect(screen.getByText('暂无分发事件')).toBeInTheDocument()
-  })
-
-  it('keeps healthy regions visible after a partial API failure', async () => {
-    mockHealthyOverview()
-    vi.spyOn(api, 'listBundles').mockRejectedValue(new Error('内容服务不可用'))
-    render(<Overview />)
-    expect(await screen.findByText('内容服务不可用')).toBeInTheDocument()
-    expect(screen.getByText('暂无分发事件')).toBeInTheDocument()
-  })
-})
-
-describe('Bundles filtering', () => {
-  const bundle = (id: string, patch: Partial<Bundle> = {}): Bundle => ({ id, name: id, kind: 'skill', description: '', archived: false, latest_version: 1, checksum: '', updated_at: '', ...patch })
-
-  async function renderList() {
-    vi.spyOn(api, 'listBundles').mockResolvedValue({ bundles: [
-      bundle('api-review', { description: '审查接口改动' }),
-      bundle('deploy-agent', { kind: 'agent', groups: ['sre'] }),
-      bundle('draft-only', { latest_version: 0 }),
-    ] })
-    render(<Bundles />)
-    await screen.findByText('api-review')
-  }
-
-  it('matches the query against name and description', async () => {
-    await renderList()
-    await userEvent.type(screen.getByLabelText('搜索内容'), '审查接口')
-    expect(screen.getByText('api-review')).toBeInTheDocument()
-    expect(screen.queryByText('deploy-agent')).not.toBeInTheDocument()
-    expect(screen.getByText('1 / 3 项')).toBeInTheDocument()
-  })
-
-  it('filters by status and clears back to the full list', async () => {
-    await renderList()
-    await userEvent.click(screen.getByLabelText('按状态筛选'))
-    await userEvent.click(screen.getByRole('option', { name: '未发布' }))
-    expect(screen.getByText('draft-only')).toBeInTheDocument()
-    expect(screen.queryByText('api-review')).not.toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: /清除筛选/ }))
-    expect(screen.getByText('api-review')).toBeInTheDocument()
-    expect(screen.getByText('共 3 项')).toBeInTheDocument()
-  })
-
-  it('explains an empty result instead of looking broken', async () => {
-    await renderList()
-    await userEvent.type(screen.getByLabelText('搜索内容'), 'zzz')
-    expect(screen.getByText(/没有匹配的内容/)).toBeInTheDocument()
-  })
-})
-
-describe('QuickStart', () => {
-  const signIn = (role: string, email = 'owner@example.com') => {
-    localStorage.setItem('ith5_user', JSON.stringify({ id: 'u', email, role, org_id: 'o' }))
-    localStorage.setItem('ith5_org', 'acme')
-  }
-
-  // 命令是给人抄到自己机器上跑的，必须指向线上服务端，不能跟着后台的
-  // 打开地址（localhost、内网 IP）变。
-  it('points the install commands at the public server, not the current origin', () => {
-    signIn('owner')
-    render(<QuickStart />)
-    expect(screen.getByText('curl -fsSL https://console.ith5.cn/install.sh | sh')).toBeInTheDocument()
-    expect(screen.getByText('ITH5_SERVER=https://console.ith5.cn ith5 login')).toBeInTheDocument()
-    expect(screen.getByText('ith5 sync')).toBeInTheDocument()
-  })
-
-  it('hands the demo credentials to read-only visitors', () => {
-    signIn('viewer', 'test@ith5.cn')
-    render(<QuickStart />)
-    expect(screen.getByText('test@ith5.cn')).toBeInTheDocument()
-    expect(screen.getByText('xLzhQrXMPs6JTEcgignI0p0j')).toBeInTheDocument()
-  })
-
-  it('never shows the shared demo password to a real member', () => {
-    signIn('admin')
-    render(<QuickStart />)
-    expect(screen.queryByText('xLzhQrXMPs6JTEcgignI0p0j')).not.toBeInTheDocument()
-    expect(screen.getByText('acme')).toBeInTheDocument()
-    expect(screen.getByText('owner@example.com')).toBeInTheDocument()
-  })
-
-  it('copies a command to the clipboard', async () => {
-    signIn('owner')
-    const writeText = vi.fn().mockResolvedValue(undefined)
-    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
-    render(<QuickStart />)
-    await userEvent.click(screen.getByRole('button', { name: '复制命令：ith5 sync' }))
-    expect(writeText).toHaveBeenCalledWith('ith5 sync')
-  })
-})
-
-describe('CSV export', () => {
-  it('adds a BOM and neutralizes spreadsheet formulas', () => {
-    const csv = toCSV([{ value: '=SUM(1,1)' }], [['value', '值']])
-    expect(csv.startsWith('\uFEFF')).toBe(true)
-    expect(csv).toContain("'=SUM(1,1)")
+describe('hash routing', () => {
+  it('parses page and id, falling back to overview', () => {
+    expect(parseHash('#/changesets/abc')).toEqual({ page: 'changesets', id: 'abc' })
+    expect(parseHash('#/resources')).toEqual({ page: 'resources', id: undefined })
+    expect(parseHash('#/nope')).toEqual({ page: 'overview' })
+    expect(parseHash('')).toEqual({ page: 'overview' })
   })
 })
