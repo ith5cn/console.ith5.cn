@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="600" viewBox="0 0 1080 600" font-family="-apple-system, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Segoe UI, sans-serif" font-size="12">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#475569"/></marker>
+    <style>
+      .box{fill:#fff;stroke:#334155;stroke-width:1.2;rx:6}
+      .zone{fill:#f8fafc;stroke:#94a3b8;stroke-width:1;stroke-dasharray:5 4;rx:10}
+      .title{font-size:15px;font-weight:600;fill:#0f172a}
+      .t{fill:#0f172a;font-size:12.5px}
+      .m{fill:#475569;font-size:11px}
+      .line{stroke:#475569;stroke-width:1.4;fill:none;marker-end:url(#a)}
+      .hl{fill:#eef2ff;stroke:#4338ca}
+      .dim{fill:#f1f5f9;stroke:#94a3b8}
+    </style>
+  </defs>
+  <rect width="1080" height="600" fill="#fff"/>
+  <text x="24" y="30" class="title">teamai-cli 内部：四种团队仓来源，同一条资源处理链</text>
+
+  <!-- commands -->
+  <rect x="24" y="52" width="1032" height="56" class="zone"/>
+  <text x="40" y="74" class="title">命令</text>
+  <g class="t">
+    <rect x="100" y="62" width="70" height="34" class="box"/><text x="118" y="84">init</text>
+    <rect x="180" y="62" width="70" height="34" class="box"/><text x="198" y="84">pull</text>
+    <rect x="260" y="62" width="70" height="34" class="box"/><text x="276" y="84">push</text>
+    <rect x="340" y="62" width="100" height="34" class="box"/><text x="352" y="84">contribute</text>
+    <rect x="450" y="62" width="80" height="34" class="box"/><text x="466" y="84">remove</text>
+    <rect x="540" y="62" width="80" height="34" class="box"/><text x="558" y="84">status</text>
+    <rect x="630" y="62" width="130" height="34" class="box"/><text x="640" y="84">会话 hook（自动 pull）</text>
+    <rect x="770" y="62" width="150" height="34" class="box"/><text x="780" y="84">recall / digest / stats</text>
+  </g>
+
+  <!-- repo kinds -->
+  <text x="24" y="140" class="title">团队仓来源（repo.kind）</text>
+  <g>
+    <rect x="24" y="152" width="240" height="120" class="box dim"/>
+    <text x="36" y="172" class="t">git（默认）</text>
+    <text x="36" y="190" class="m">clone / pull 团队仓库</text>
+    <text x="36" y="206" class="m">push = 分支 + MR，merge 生效</text>
+    <text x="36" y="222" class="m">上报 = 直接提交到仓库</text>
+    <text x="36" y="238" class="m">需要 Git、仓库地址、凭据</text>
+
+    <rect x="280" y="152" width="240" height="120" class="box dim"/>
+    <text x="292" y="172" class="t">http（local-agent，只读）</text>
+    <text x="292" y="190" class="m">report / sync / ack 协议</text>
+    <text x="292" y="206" class="m">只下发 skills、rules、CLAUDE.md</text>
+    <text x="292" y="222" class="m">push / contribute 被拒绝</text>
+    <text x="292" y="238" class="m">手工 API key</text>
+
+    <rect x="536" y="152" width="240" height="120" class="box dim"/>
+    <text x="548" y="172" class="t">self（单仓）</text>
+    <text x="548" y="190" class="m">业务仓库自带 .teamai/</text>
+    <text x="548" y="206" class="m">push = 业务仓库的 PR</text>
+    <text x="548" y="222" class="m">上报 = teamai-reports 孤儿分支</text>
+    <text x="548" y="238" class="m">目录必须是 git 仓库且有 origin</text>
+
+    <rect x="792" y="152" width="264" height="120" class="box hl"/>
+    <text x="804" y="172" class="t">server（本补丁新增）</text>
+    <text x="804" y="190" class="m">GET /v1/bindings/{id}/snapshot（304）</text>
+    <text x="804" y="206" class="m">GET /v1/blobs/{sha256}</text>
+    <text x="804" y="222" class="m">push / remove → /v1/change-sets</text>
+    <text x="804" y="238" class="m">contribute → /v1/learnings</text>
+    <text x="804" y="254" class="m">上报 → /v1/reports/events · 零 Git</text>
+  </g>
+
+  <!-- arrows down to team-repo -->
+  <path d="M144 272V300" class="line"/><path d="M400 272V300" class="line"/><path d="M656 272V300" class="line"/><path d="M924 272V300" class="line"/>
+  
+
+  <!-- team repo tree -->
+  <rect x="24" y="302" width="1032" height="64" class="box"/>
+  <text x="40" y="324" class="t">team-repo 目录（localPath）</text>
+  <text x="40" y="344" class="m">teamai.yaml · skills/&lt;name&gt;/ · rules/*.md · docs/ · agents/*.yaml · env/env.yaml · hooks/hooks.yaml · mcp/mcp.yaml · claudemd/&lt;ns&gt;/ · culture.md · learnings/</text>
+  <text x="40" y="358" class="m">refreshTeamRepo()：每种来源只负责把"当前应得的资源"放进这个目录。server 模式由 server-format.ts 从快照渲染，与服务端 internal/teamaifmt 输出一致</text>
+
+  <path d="M540 366V394" class="line"/>
+
+  <!-- handlers -->
+  <rect x="24" y="396" width="1032" height="64" class="box"/>
+  <text x="40" y="418" class="t">ResourceHandlers（一行未改）</text>
+  <text x="40" y="438" class="m">skills · rules · docs · agents · env · hooks · mcp · claudemd · learnings：scanTeamForPull / pullItem / scanLocalForPush / removeItem</text>
+  <text x="40" y="452" class="m">按各工具的格式转换（rule → .mdc、agent → 各工具的 subagent 文件、hook → settings.json、mcp → .mcp.json / config.toml …）</text>
+
+  <path d="M540 460V488" class="line"/>
+
+  <!-- tools -->
+  <rect x="24" y="490" width="1032" height="44" class="zone"/>
+  <text x="40" y="512" class="title">AI 工具</text>
+  <text x="120" y="512" class="m">Claude Code · Codex · Cursor · CodeBuddy · WorkBuddy · OpenCode · JoyCode · Qoder …（.claude/ .codex/ .cursor/ …）</text>
+
+  <text x="24" y="566" class="m">补丁改动面：新增 server-repo.ts（/v1 客户端与 journal 物化）、server-format.ts（渲染）、server-write.ts（写方向与上报）；</text>
+  <text x="24" y="584" class="m">init / pull / push / contribute / remove / status / hook 各加一个 kind === 'server' 分支。git、http、self 三种模式行为不变。</text>
+</svg>
