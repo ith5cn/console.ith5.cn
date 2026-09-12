@@ -1,7 +1,7 @@
 # teamai-cli：`server` 仓库类型（零 Git 接入）
 
 这是给 [Tencent/teamai-cli](https://github.com/Tencent/teamai-cli) 的补丁，让它直接以 ith5-server 为团队仓库，
-成员机器上不需要 Git。补丁基于 teamai-cli `main`（34e1cfb，v0.23 之后）。
+成员机器上不需要 Git。补丁基于 teamai-cli `main`（a29e5ef）。
 
 ```sh
 git clone https://github.com/Tencent/teamai-cli && cd teamai-cli

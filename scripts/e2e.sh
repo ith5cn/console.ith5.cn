@@ -25,7 +25,7 @@ if [ -z "${TEAMAI_CLI:-}" ]; then
   CACHE=$ROOT/.cache/teamai-cli
   if [ ! -f "$CACHE/dist/index.js" ]; then
     rm -rf "$CACHE"; git clone -q https://github.com/Tencent/teamai-cli "$CACHE"
-    (cd "$CACHE" && git checkout -q 34e1cfb && git -c user.name=e2e -c user.email=e2e@local am -q "$ROOT"/contrib/teamai-cli/*.patch && npm ci --silent && npm run build --silent)
+    (cd "$CACHE" && git checkout -q a29e5ef && git -c user.name=e2e -c user.email=e2e@local am -q "$ROOT"/contrib/teamai-cli/*.patch && npm ci --silent && npm run build --silent)
   fi
   TEAMAI_CLI=$CACHE/dist/index.js
 fi

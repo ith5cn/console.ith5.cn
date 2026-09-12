@@ -1,4 +1,4 @@
-From 937c5fc42fd23815a56b7077b25532204e6dfb0b Mon Sep 17 00:00:00 2001
+From f6cd2e7ed55fc25f61263fe6d17d9ad1dc075bfa Mon Sep 17 00:00:00 2001
 From: ith5 <ith5cn@163.com>
 Date: Fri, 11 Sep 2026 09:32:38 -0700
 Subject: [PATCH] =?UTF-8?q?feat:=20server=20repo=20kind=20=E2=80=94=20git-?=
@@ -19,7 +19,7 @@ session reports over HTTP. No git anywhere on the member's machine.
  src/hook-handlers.ts               |   9 +
  src/index.ts                       |   5 +-
  src/init.ts                        | 224 +++++++++++
- src/pull.ts                        |  41 +-
+ src/pull.ts                        |  42 ++-
  src/push.ts                        |   7 +
  src/remove.ts                      |   7 +
  src/server-format.ts               | 234 ++++++++++++
@@ -27,7 +27,7 @@ session reports over HTTP. No git anywhere on the member's machine.
  src/server-write.ts                | 400 ++++++++++++++++++++
  src/status.ts                      |  11 +-
  src/types.ts                       |  13 +-
- 15 files changed, 1851 insertions(+), 8 deletions(-)
+ 15 files changed, 1852 insertions(+), 8 deletions(-)
  create mode 100644 src/__tests__/server-repo.test.ts
  create mode 100644 src/__tests__/server-write.test.ts
  create mode 100644 src/server-format.ts
@@ -35,7 +35,7 @@ session reports over HTTP. No git anywhere on the member's machine.
  create mode 100644 src/server-write.ts
 
 diff --git a/README.md b/README.md
-index 7c0815b..99be7f4 100644
+index 419e4d4..e434a1e 100644
 --- a/README.md
 +++ b/README.md
 @@ -52,6 +52,21 @@ teamai init https://github.com/yourorg/yourrepo --scope user
@@ -417,7 +417,7 @@ index 5f37a0c..ab50eb7 100644
          await syncVotesToTeam(localConfig.repo.localPath, localConfig.username, votesDir).catch(() => {
            // Push failed — will retry next session
 diff --git a/src/index.ts b/src/index.ts
-index 6432abf..29e82f2 100644
+index e2badc2..310394e 100644
 --- a/src/index.ts
 +++ b/src/index.ts
 @@ -53,6 +53,8 @@ program
@@ -689,11 +689,11 @@ index bb3b11b..3127a79 100644
    // repo IS the team repo; knowledge lives on main under .teamai/, reports go to
    // the teamai-reports orphan branch. No separate team repo is cloned.
 diff --git a/src/pull.ts b/src/pull.ts
-index 73cc9dd..8b9f82d 100644
+index fe78f22..ff391e3 100644
 --- a/src/pull.ts
 +++ b/src/pull.ts
-@@ -75,6 +75,25 @@ async function refreshTeamRepo(
-     return { label: 'HTTP (report/sync delivery)', version: null, reportingOnly: true };
+@@ -81,6 +81,25 @@ async function refreshTeamRepo(
+     return { label: 'HTTP (report/sync delivery)', version: null, reportingOnly: true, submodulesFailed: false, submodulesChanged: false };
    }
  
 +  if (localConfig.repo.kind === 'server') {
@@ -712,31 +712,32 @@ index 73cc9dd..8b9f82d 100644
 +    const label = outcome.changed
 +      ? `team server (revision ${outcome.revision.slice(0, 19)})`
 +      : `team server (unchanged at ${outcome.revision.slice(0, 19)})`;
-+    return { label, version: outcome.revision, reportingOnly: false };
++    return { label, version: outcome.revision, reportingOnly: false, submodulesFailed: false, submodulesChanged: false };
 +  }
 +
    if (localConfig.repo.kind === 'self') {
      // Single-repo mode: knowledge lives under <business-repo>/.teamai on main and
      // arrives with the business repo's own `git clone`/`git pull`. teamai must NOT
-@@ -1549,7 +1568,7 @@ export async function pull(options: GlobalOptions): Promise<void> {
-       const { reportUsageToTeam } = await import('./team-push.js');
-       const { truncateUsageAfterReport, readUsageEvents } = await import('./usage-tracker.js');
-       const targets: Array<{ repoPath: string; username: string; opts: { skipTruncate: true; projectRoot?: string; excludeProjectRoots?: string[]; selfConfig?: LocalConfig } }> = [];
--      if (reconcileProject && reconcileProject.repo.kind !== 'http') {
-+      if (reconcileProject && reconcileProject.repo.kind !== 'http' && reconcileProject.repo.kind !== 'server') {
+@@ -1633,7 +1652,8 @@ export async function pull(options: GlobalOptions): Promise<void> {
+       // Per-target opt-out (teamai.yaml `usageReport: false`): a repo that
+       // disables stat commits is dropped from the targets — e.g. teams
+       // pulling from a read-only remote never accumulate unpushable commits.
+-      if (reconcileProject && reconcileProject.repo.kind !== 'http'
++      // Server-backed scopes report over HTTP (see serverTargets above).
++      if (reconcileProject && reconcileProject.repo.kind !== 'http' && reconcileProject.repo.kind !== 'server'
+         && !await usageReportDisabled(reconcileProject.repo.localPath)) {
          targets.push({
            repoPath: reconcileProject.repo.localPath,
-           username: reconcileProject.username,
-@@ -1561,7 +1580,7 @@ export async function pull(options: GlobalOptions): Promise<void> {
+@@ -1646,7 +1666,7 @@ export async function pull(options: GlobalOptions): Promise<void> {
            },
          });
        }
--      if (reconcileUser && reconcileUser.repo.kind !== 'http') {
-+      if (reconcileUser && reconcileUser.repo.kind !== 'http' && reconcileUser.repo.kind !== 'server') {
+-      if (reconcileUser && reconcileUser.repo.kind !== 'http'
++      if (reconcileUser && reconcileUser.repo.kind !== 'http' && reconcileUser.repo.kind !== 'server'
+         && !await usageReportDisabled(reconcileUser.repo.localPath)) {
          targets.push({
            repoPath: reconcileUser.repo.localPath,
-           username: reconcileUser.username,
-@@ -1575,6 +1594,22 @@ export async function pull(options: GlobalOptions): Promise<void> {
+@@ -1661,6 +1681,22 @@ export async function pull(options: GlobalOptions): Promise<void> {
          });
        }
  
@@ -759,10 +760,10 @@ index 73cc9dd..8b9f82d 100644
        const eventCount = (await readUsageEvents()).length;
        for (const t of targets) {
          try {
-@@ -1583,7 +1618,7 @@ export async function pull(options: GlobalOptions): Promise<void> {
-           log.error(`Auto-report to ${t.repoPath} skipped: ${(e as Error).message}`);
-         }
+@@ -1671,7 +1707,7 @@ export async function pull(options: GlobalOptions): Promise<void> {
        }
+       // Truncate only what was reported — an opted-out repo keeps its local
+       // event log (the dashboard still reads it).
 -      if (eventCount > 0 && targets.length > 0) {
 +      if (eventCount > 0 && (targets.length > 0 || serverReported)) {
          await truncateUsageAfterReport(eventCount);
@@ -2059,7 +2060,7 @@ index 2c65bac..d06f7f4 100644
      console.log(`  repo: ${localConfig.repo.remote}`);
      console.log(`  local: ${localConfig.repo.localPath}`);
 diff --git a/src/types.ts b/src/types.ts
-index 66b9bfd..32f2829 100644
+index 808fb10..ee2b1a2 100644
 --- a/src/types.ts
 +++ b/src/types.ts
 @@ -230,7 +230,7 @@ export const TeamaiConfigSchema = z.object({
@@ -2071,7 +2072,7 @@ index 66b9bfd..32f2829 100644
    reviewers: z.array(z.string()).default([]),
    /** Skills this team makes available to other teams via cross-team subscription. */
    publicSkills: z.array(z.string()).optional(),
-@@ -342,10 +342,17 @@ export const LocalConfigSchema = z.object({
+@@ -349,10 +349,17 @@ export const LocalConfigSchema = z.object({
       *           Knowledge lives on main under <businessRepoRoot>/.teamai/;
       *           reports (members/sessions/votes/stats) live on the
       *           `teamai-reports` orphan branch. localPath = <businessRepoRoot>/.teamai.
