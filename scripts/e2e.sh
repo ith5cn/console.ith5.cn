@@ -49,7 +49,7 @@ MEMBER=$(session member@example.com); OWNER=$(session demo@example.com)
 
 say "employee: init --server in a directory that is not a git repo"
 export HOME=$WORK/home; mkdir -p "$HOME/ws"; cd "$HOME/ws"
-node "$TEAMAI_CLI" init --server "$BASE" --agent claude --scope project >"$WORK/init.out" 2>&1 &
+node "$TEAMAI_CLI" init --server "$BASE" --agent claude,codex --scope project >"$WORK/init.out" 2>&1 &
 INIT_PID=$!
 for _ in $(seq 1 40); do grep -q "code:" "$WORK/init.out" && break; sleep 0.5; done
 CODE=$(grep -o "code: [A-Z0-9-]*" "$WORK/init.out" | awk '{print $2}')
@@ -58,7 +58,10 @@ wait $INIT_PID
 test ! -d .git
 test -f .claude/skills/billing-deploy/SKILL.md && test -f .claude/rules/security-baseline.md && test -f .claude/agents/code-reviewer.md
 grep -q teamai "$HOME/.claude/settings.json"   # hooks are injected into the tool's user-level settings
-echo "ok: skills, rules, agents, hooks installed without git"
+echo "ok: claude — skills, rules, agents, hooks installed without git"
+test -f .codex/skills/billing-deploy/SKILL.md && test -f .codex/rules/security-baseline.md && test -f .codex/agents/code-reviewer.toml
+grep -q teamai "$HOME/.codex/hooks.json"
+echo "ok: codex — skills, rules, agents (toml), hooks installed"
 
 say "second pull is a 304"
 node "$TEAMAI_CLI" pull 2>&1 | expect "unchanged at" "unchanged"
@@ -71,7 +74,7 @@ DG=$(curl -s -H "Authorization: Bearer $OWNER" "$BASE/v1/change-sets/$CS" | json
 curl -sf -o /dev/null -X POST "$BASE/v1/change-sets/$CS/reviews" -H "Authorization: Bearer $OWNER" -H 'content-type: application/json' -d "{\"decision\":\"approve\",\"digest\":\"$DG\",\"comment\":\"e2e\"}"
 curl -sf -o /dev/null -X POST "$BASE/v1/change-sets/$CS/publish" -H "Authorization: Bearer $OWNER"
 node "$TEAMAI_CLI" pull 2>&1 | expect "e2e-skill|all updated" "published skill pulled"
-test -f .claude/skills/e2e-skill/SKILL.md
+test -f .claude/skills/e2e-skill/SKILL.md && test -f .codex/skills/e2e-skill/SKILL.md
 BINDING=$(grep bindingId .teamai/config.yaml | awk '{print $2}')
 curl -s -H "Authorization: Bearer $MEMBER" "$BASE/v1/bindings/$BINDING/snapshot" | jsonq '[e["name"] for e in d["resources"] if e["kind"]=="skill"]' | expect "e2e-skill" "snapshot has it"
 
