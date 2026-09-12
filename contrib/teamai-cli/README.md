@@ -41,5 +41,5 @@ teamai remove rules old-rule       # 删除走同一条审核
 
 ## 服务端对应
 
-`ith5-server` 的接口见 [docs/开发规格.md](../../docs/开发规格.md) §1。`cmd/ith5-materialize` 保留为 Go 版参考实现，
+`ith5-server` 的接口以 `internal/api/server.go` 的路由与 `GET /v1/capabilities` 为准。`cmd/ith5-materialize` 保留为 Go 版参考实现，
 员工不再需要它。

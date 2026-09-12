@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="640" viewBox="0 0 1080 640" font-family="-apple-system, 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', Segoe UI, sans-serif" font-size="12">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#475569"/></marker>
+    <style>
+      .box{fill:#fff;stroke:#334155;stroke-width:1.2;rx:6}
+      .zone{fill:#f8fafc;stroke:#94a3b8;stroke-width:1;stroke-dasharray:5 4;rx:10}
+      .title{font-size:15px;font-weight:600;fill:#0f172a}
+      .t{fill:#0f172a;font-size:12.5px}
+      .m{fill:#475569;font-size:11px}
+      .line{stroke:#475569;stroke-width:1.4;fill:none;marker-end:url(#a)}
+      .hl{fill:#eef2ff;stroke:#4338ca}
+    </style>
+  </defs>
+  <rect width="1080" height="640" fill="#fff"/>
+  <text x="24" y="30" class="title">ith5-server：teamai-cli 的 Go 管理后端（单二进制，仅依赖 PostgreSQL）</text>
+
+  <!-- 员工机器 -->
+  <rect x="24" y="52" width="230" height="220" class="zone"/>
+  <text x="38" y="74" class="title">员工机器</text>
+  <rect x="38" y="88" width="202" height="58" class="box hl"/>
+  <text x="48" y="107" class="t">teamai-cli（server 模式）</text>
+  <text x="48" y="124" class="m">init --server · pull · push · contribute</text>
+  <text x="48" y="138" class="m">无 Git、无仓库地址、无 API key</text>
+  <rect x="38" y="160" width="202" height="46" class="box"/>
+  <text x="48" y="179" class="t">team-repo 镜像（快照物化）</text>
+  <text x="48" y="195" class="m">skills/ rules/ agents/ env/ hooks/ …</text>
+  <rect x="38" y="218" width="202" height="42" class="box"/>
+  <text x="48" y="237" class="t">AI 工具目录</text>
+  <text x="48" y="252" class="m">.claude/ .cursor/ .codex/ …</text>
+  <path d="M139 146V160" class="line"/><path d="M139 206V218" class="line"/>
+
+  <!-- 管理后台 -->
+  <rect x="24" y="300" width="230" height="110" class="zone"/>
+  <text x="38" y="322" class="title">管理员浏览器</text>
+  <rect x="38" y="336" width="202" height="60" class="box"/>
+  <text x="48" y="355" class="t">管理后台（React，编译进二进制）</text>
+  <text x="48" y="371" class="m">内容库 · 变更集审核 · 发布 · 权限组</text>
+  <text x="48" y="385" class="m">成员 · 设备 · 接入码 · 知识库 · 审计</text>
+
+  <!-- IdP -->
+  <rect x="24" y="440" width="230" height="70" class="zone"/>
+  <text x="38" y="462" class="title">企业身份源</text>
+  <rect x="38" y="474" width="202" height="28" class="box"/>
+  <text x="48" y="492" class="t">OIDC（分组 → 组织/团队/项目角色）</text>
+
+  <!-- arrows to server -->
+  <path d="M254 117H296" class="line"/><text x="256" y="108" class="m">/v1</text>
+  <path d="M254 366H296" class="line"/><text x="256" y="357" class="m">/v1</text>
+  <path d="M254 488H296" class="line"/><text x="256" y="479" class="m">PKCE</text>
+
+  <!-- server -->
+  <rect x="298" y="52" width="536" height="458" class="zone"/>
+  <text x="312" y="74" class="title">ith5-server</text>
+  <rect x="312" y="88" width="508" height="54" class="box"/>
+  <text x="322" y="107" class="t">internal/api（chi）</text>
+  <text x="322" y="126" class="m">JWT（login / session / device）· ETag · Idempotency-Key · 分页 · 限流 · 客户端版本 · /metrics</text>
+
+  <g>
+    <rect x="312" y="156" width="162" height="64" class="box"/><text x="322" y="175" class="t">identity</text><text x="322" y="192" class="m">密码 · 设备流 · 接入码</text><text x="322" y="206" class="m">OIDC · 撤销 · 对账</text>
+    <rect x="485" y="156" width="162" height="64" class="box"/><text x="495" y="175" class="t">organizations / projects</text><text x="495" y="192" class="m">组织 → 团队 → 项目</text><text x="495" y="206" class="m">角色推导权限 · 工作区绑定</text>
+    <rect x="658" y="156" width="162" height="64" class="box"/><text x="668" y="175" class="t">resources / sync</text><text x="668" y="192" class="m">11 种 kind · 层级解析</text><text x="668" y="206" class="m">快照 · revision · blob</text>
+
+    <rect x="312" y="234" width="162" height="64" class="box"/><text x="322" y="253" class="t">changesets / releases</text><text x="322" y="270" class="m">draft → review → published</text><text x="322" y="284" class="m">发布事务 · 回滚</text>
+    <rect x="485" y="234" width="162" height="64" class="box"/><text x="495" y="253" class="t">knowledge</text><text x="495" y="270" class="m">learnings 直发 · 密钥扫描</text><text x="495" y="284" class="m">置信度 · 晋升 · 检索</text>
+    <rect x="658" y="234" width="162" height="64" class="box"/><text x="668" y="253" class="t">telemetry</text><text x="668" y="270" class="m">投票 · 会话 · 用量 · skill</text><text x="668" y="284" class="m">白名单解析 · 周报</text>
+
+    <rect x="312" y="312" width="162" height="48" class="box"/><text x="322" y="331" class="t">audit</text><text x="322" y="348" class="m">管理动作 · 分发 · 执行</text>
+    <rect x="485" y="312" width="162" height="48" class="box"/><text x="495" y="331" class="t">maintenance</text><text x="495" y="348" class="m">每日保留期清理 · 对账统计</text>
+    <rect x="658" y="312" width="162" height="48" class="box"/><text x="668" y="331" class="t">teamaifmt</text><text x="668" y="348" class="m">快照 → teamai 仓库布局</text>
+  </g>
+
+  <rect x="312" y="376" width="508" height="40" class="box"/>
+  <text x="322" y="395" class="t">internal/db（pgx，每模块一个 store）</text>
+  <text x="322" y="409" class="m">platform：config / httpx / pg / ratelimit / metrics</text>
+
+  <rect x="312" y="432" width="508" height="64" class="box"/>
+  <text x="322" y="451" class="t">两个平面</text>
+  <text x="322" y="469" class="m">已发布资源面：bundles · bundle_versions · blobs · releases · content_heads</text>
+  <text x="322" y="485" class="m">用户上报面：knowledge_votes · sessions · usage_daily · skill_usage · execution_events</text>
+
+  <!-- DB -->
+  <path d="M834 300H862" class="line"/>
+  <rect x="864" y="256" width="192" height="88" class="box"/>
+  <text x="876" y="277" class="t">PostgreSQL</text>
+  <text x="876" y="295" class="m">迁移 embed 进二进制</text>
+  <text x="876" y="311" class="m">启动时自动执行</text>
+  <text x="876" y="327" class="m">内容也在库里（blobs）</text>
+
+  <!-- legend -->
+  <text x="24" y="552" class="m">数据流：员工机器每次会话启动 pull 一次快照（未变化 304）；改动以变更集提交，管理员在后台审核发布，下一次 pull 生效；</text>
+  <text x="24" y="570" class="m">投票 / 会话 / 用量在 pull 时上报。停用账号 → 下一次 pull 拿到空清单 → 本机内容卸载。</text>
+  <text x="24" y="598" class="m">对应 teamai-cli issue #341 的映射：clone/pull → 快照，commit → 变更集，branch → 草稿，MR → 审核，merge → 发布，</text>
+  <text x="24" y="614" class="m">revision → revision，conflict → 412 乐观锁，revert → 回滚。</text>
+</svg>
