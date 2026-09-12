@@ -19,19 +19,19 @@
 repo with a server: organizations, teams, projects, device login without Git, changesets with review
 and atomic publish, hash-addressed sync with revisions, learnings with secret scanning, weekly digest,
 and audit. Single Go binary with embedded migrations and admin console; the only dependency is
-PostgreSQL. English design docs live in [docs/en/](./docs/en/).</sub>
+PostgreSQL. Manuals live in [manual/](./manual/).</sub>
 
 > 这个仓库的目标是成为 teamai-cli issue #341 所描述的「Go 管理后端」的实现，
-> 最终以 `server/` 的形式贡献到 teamai-cli。在此之前它独立发布，接口以 [docs/开发规格.md](./docs/开发规格.md) 为准。
+> 最终以 `server/` 的形式贡献到 teamai-cli。在此之前它独立发布，接口以 `/v1` 的实现与 `GET /v1/capabilities` 为准。
 
 ## 架构一图
 
-![ith5-server 架构](docs/images/architecture-server.svg)
+![ith5-server 架构](manual/images/architecture-server.svg)
 
 员工机器上的 teamai-cli 走 `/v1` 拉快照、提交变更集、上报数据；管理员在嵌入的后台审核发布；企业身份源通过 OIDC 接入。
 服务端是分层单体，每个领域一个包，数据全在 PostgreSQL 里。
 
-![teamai-cli 内部与 server 模式](docs/images/architecture-teamai-cli.svg)
+![teamai-cli 内部与 server 模式](manual/images/architecture-teamai-cli.svg)
 
 teamai-cli 的四种团队仓来源都只负责把"当前应得的资源"放进同一个目录，后面的资源处理链与各 AI 工具的适配完全共用。
 `server` 模式是 [contrib/teamai-cli/](./contrib/teamai-cli/) 里的补丁新增的：不需要 Git，读写与上报全走后台。
@@ -96,7 +96,7 @@ teamai remove rules old-rule         # 删除走同样的审核
 
 `cmd/ith5-materialize` 是同一套协议的 Go 参考实现，留给写其他适配器的人。
 
-详细步骤见 [docs/员工上手.md](./docs/员工上手.md)，管理员操作见 [docs/管理员手册.md](./docs/管理员手册.md)。
+详细步骤见 [manual/员工上手.md](./manual/员工上手.md)，管理员操作见 [manual/管理员手册.md](./manual/管理员手册.md)。
 
 ## 能力一览
 
@@ -151,7 +151,8 @@ internal/teamaifmt     把快照渲染成 teamai 的仓库布局
 internal/db            仓储层（手写 pgx），每个模块一个 store
 internal/api           chi 路由与 handler，按模块分文件
 db/migrations          goose 迁移，embed 进二进制
-docs/                  设计文档（中文）与 docs/en/（英文）
+manual/                使用手册与架构图
+contrib/teamai-cli/    给 teamai-cli 的 server 模式补丁
 ```
 
 ## 服务端配置
@@ -186,12 +187,12 @@ cd web && npx vitest run
 
 ## 文档
 
-- [docs/开发规格.md](./docs/开发规格.md) — 接口总表、数据库结构、目录、页面清单、分段验收
-- [docs/设计-身份与组织模型.md](./docs/设计-身份与组织模型.md) · [资源类型与层级](./docs/设计-资源类型与层级.md) · [同步协议](./docs/设计-同步协议.md) · [变更集与发布](./docs/设计-变更集与发布.md) · [知识与上报面](./docs/设计-知识与上报面.md)
-- [docs/designs/management-backend.md](./docs/designs/management-backend.md) · [zh-CN](./docs/designs/management-backend.zh-CN.md) — 按 #341 交付物结构整理的总设计
-- [docs/运维-备份与恢复.md](./docs/运维-备份与恢复.md) — 备份、恢复、数据保留、监控
-- [docs/en/](./docs/en/) — 上述设计文档的英文版
-- [docs/换客户端方案.md](./docs/换客户端方案.md) — 为什么放弃自研客户端、改为对齐 teamai-cli
+- [manual/员工上手.md](./manual/员工上手.md) — 员工怎么接入、同步、推送、分享经验
+- [manual/管理员手册.md](./manual/管理员手册.md) — 从零建组织到发布、授权、审核、入离职、身份源、排障、部署
+- [manual/运维-备份与恢复.md](./manual/运维-备份与恢复.md) — 备份、恢复、数据保留、监控
+- [contrib/teamai-cli/README.md](./contrib/teamai-cli/README.md) — 客户端补丁怎么打、改了什么
+
+代码与 SQL 注释里引用的 `docs/设计-*.md`、`docs/开发规格.md` 是内部设计文档，不随仓库发布；每处引用旁边都写清了该条约束本身。
 
 ## 参与贡献
 
